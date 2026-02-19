@@ -18,7 +18,9 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddCors();
 var app = builder.Build();
 
-app.Urls.Add("http://localhost:5000");
+// Bind to all interfaces (0.0.0.0) for cloud deployment; read PORT from environment
+var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
+app.Urls.Add($"http://0.0.0.0:{port}");
 
 app.UseCors(policy => policy
     .WithOrigins("http://localhost:5173", "http://localhost:5174")
@@ -858,8 +860,8 @@ Accedi al sistema per revisione e approvazione.";
             {
                 var host = "smtp.gmail.com";
                 var port = 587;
-                var username = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? "bini.fos@gmail.com";
-                var password = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? "kbmj butl qoff oejd";
+                var username = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
+                var password = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
 
                 await client.ConnectAsync(host, port, SecureSocketOptions.StartTls);
                 await client.AuthenticateAsync(username, password);
@@ -895,8 +897,8 @@ Accedi al sistema per revisione e approvazione.";
             {
                 var host = "smtp.gmail.com";
                 var port = 587;
-                var username = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? "bini.fos@gmail.com";
-                var password = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? "kbmj butl qoff oejd";
+                var username = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
+                var password = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
 
                 await client.ConnectAsync(host, port, SecureSocketOptions.StartTls);
                 await client.AuthenticateAsync(username, password);
@@ -934,8 +936,8 @@ Effettua l'accesso e cambia la password al più presto.";
             {
                 var host = "smtp.gmail.com";
                 var port = 587;
-                var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? "bini.fos@gmail.com";
-                var smtpPassword = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? "kbmj butl qoff oejd";
+                var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
+                var smtpPassword = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
 
                 await client.ConnectAsync(host, port, SecureSocketOptions.StartTls);
                 await client.AuthenticateAsync(smtpUsername, smtpPassword);
