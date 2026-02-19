@@ -723,7 +723,7 @@ public class DataStore
                 }
             }
 
-            cmd.CommandText = "SELECT id, employeeusername, employeename, dayofweek, dayname, status, decisionby, decisionat FROM recurring_requests";
+            cmd.CommandText = "SELECT id, employeeusername, employeename, dayofweek, dayname, status, decisionby, decisionat FROM recurringrequests";
             using (var rdr3 = cmd.ExecuteReader())
             {
                 while (rdr3.Read())
