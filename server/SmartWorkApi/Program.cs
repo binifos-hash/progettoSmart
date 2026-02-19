@@ -23,7 +23,7 @@ var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
 app.Urls.Add($"http://0.0.0.0:{port}");
 
 app.UseCors(policy => policy
-    .WithOrigins("http://localhost:5173", "http://localhost:5174")
+    .WithOrigins("http://localhost:5173", "http://localhost:5174", "http://localhost:5000")
     .AllowAnyHeader()
     .AllowAnyMethod()
     .AllowCredentials());
