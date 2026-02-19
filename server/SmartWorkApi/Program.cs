@@ -18,12 +18,34 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddCors();
 var app = builder.Build();
 
+var defaultAllowedOrigins = new[]
+{
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5000",
+    "http://localhost:3000",
+    "https://progettosmart.onrender.com",
+    "https://progettosmart-front.onrender.com"
+};
+
+var allowedOrigins = Environment.GetEnvironmentVariable("ALLOWED_ORIGINS")
+    ?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+    .Select(o => o.Trim().TrimEnd('/'))
+    .Where(o => !string.IsNullOrWhiteSpace(o))
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
+
+if (allowedOrigins == null || allowedOrigins.Length == 0)
+{
+    allowedOrigins = defaultAllowedOrigins;
+}
+
 // Bind to all interfaces (0.0.0.0) for cloud deployment; read PORT from environment
 var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
 app.Urls.Add($"http://0.0.0.0:{port}");
 
 app.UseCors(policy => policy
-    .WithOrigins("http://localhost:5173", "http://localhost:5174", "http://localhost:5000", "http://localhost:3000")
+    .WithOrigins(allowedOrigins)
     .AllowAnyHeader()
     .AllowAnyMethod()
     .AllowCredentials());
