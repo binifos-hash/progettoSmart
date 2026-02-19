@@ -1,4 +1,4 @@
-const BASE = 'http://localhost:5000'
+const BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000'
 
 function authHeaders() {
   const token = localStorage.getItem('sw_token')
