@@ -30,7 +30,7 @@ if (allowedOrigins == null || allowedOrigins.Length == 0)
     allowedOrigins = new string[0];
 }
 
-console.WriteLine($"[CONFIG] Allowed origins: {(allowedOrigins.Length > 0 ? string.Join(", ", allowedOrigins) : "None")}");
+Console.WriteLine($"[CONFIG] Allowed origins: {(allowedOrigins.Length > 0 ? string.Join(", ", allowedOrigins) : "None")}");
 
 // Bind to all interfaces (0.0.0.0) for cloud deployment; read PORT from environment
 var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
