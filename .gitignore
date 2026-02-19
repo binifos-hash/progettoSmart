@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+/node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+/client/dist
+/server/SmartWorkApi/bin
+/server/SmartWorkApi/obj
+*.dll
+*.exe
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables (local secrets, NEVER commit)
+.env
+.env.local
+.env.*.local
+
+# Database files (local development)
+data.db
+data.json
+
+# Temporary files
+*.tmp
+*.bak

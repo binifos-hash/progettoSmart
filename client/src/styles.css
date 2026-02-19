@@ -1,0 +1,791 @@
+* { box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+  margin: 0;
+  padding: 0;
+  background: #f5f5f5;
+}
+
+.container {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+h1 {
+  font-size: 28px;
+  font-weight: 600;
+  margin: 0 0 20px 0;
+  color: #1a1a1a;
+}
+
+h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 16px 0;
+  color: #1a1a1a;
+}
+
+h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 20px 0 12px 0;
+  color: #1a1a1a;
+}
+
+.header-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.header-top.dark {
+  background: #1f2937;
+  padding: 12px 16px;
+  border-radius: 8px;
+}
+
+.header-top.dark h1,
+.header-top.dark .user-info {
+  color: #f3f4f6;
+}
+
+.theme-toggle {
+  background: transparent;
+  border: 1px solid #ddd;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.header-top.dark .theme-toggle {
+  border-color: #374151;
+  color: #f3f4f6;
+}
+
+/* Dark mode for entire container */
+
+/* Dark mode palette variables */
+.container.dark {
+  /* Updated dark palette: deeper, warmer slate with teal accents */
+  --bg: #07111a;        /* page background */
+  --surface-1: #0d1620; /* cards, panels */
+  --surface-2: #0b1420; /* inner surfaces */
+  --muted: #94a3b8;     /* muted text */
+  --text: #e6eef8;      /* main text */
+  --accent: #0ea5a4;    /* primary accent (teal) */
+  --accent-2: #06b6d4;  /* secondary accent (cyan) */
+  --border: #0f2430;
+  --card-border: #11202a;
+  --success: #16a34a;
+  --success-weak: #ddf7ea;
+  --danger: #ef4444;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.container.dark h1,
+.container.dark h2,
+.container.dark h3 { color: var(--text); }
+
+.container.dark .card,
+.container.dark .login-card {
+  background: linear-gradient(180deg, var(--surface-1), var(--surface-2));
+  box-shadow: 0 2px 8px rgba(3,6,12,0.6);
+  border: 1px solid var(--card-border);
+}
+
+.container.dark .tabs button { color: var(--muted); }
+.container.dark .tabs button.active { color: #bfe0ff; border-bottom-color: var(--accent); }
+
+/* Darken the tabs underline in dark mode */
+.container.dark .tabs {
+  border-bottom: 2px solid rgba(255,255,255,0.06);
+}
+
+.container.dark .header-top { background: transparent; }
+.container.dark .user-info { color: #cbd6e6; }
+
+.container.dark .cal-cell:not(.head):not(.empty) {
+  border: 1px solid #0f2636;
+  background: linear-gradient(180deg,#071427 0%, #061026 100%);
+}
+
+.container.dark .cal-cell:hover { transform: translateY(-2px); box-shadow: 0 4px 10px rgba(2,6,12,0.6); }
+
+.container.dark .cal-cell.selected { background: var(--accent); color: #fff; }
+
+/* Recurring day styling in dark mode */
+.container.dark .cal-cell.recurring-day {
+  border: 2px solid #0ea5a4;
+  background: linear-gradient(180deg, rgba(14,165,164,0.15), rgba(14,165,164,0.08));
+}
+
+.container.dark .cal-cell.recurring-day:hover {
+  background: linear-gradient(180deg, rgba(14,165,164,0.25), rgba(14,165,164,0.15));
+  border-color: var(--accent-2);
+}
+
+.container.dark .recurring-indicator {
+  color: #4ede80;
+  font-weight: 600;
+}
+
+.container.dark .cal-event-title {
+  background: linear-gradient(180deg, var(--accent-2), #12355a);
+  color: #e6f2ff;
+}
+
+.container.dark .cal-cell .cal-event-dot { background: var(--accent); box-shadow: 0 1px 3px rgba(37,99,235,0.3); }
+
+.container.dark .requests th {
+  background: #071428;
+  color: #cfe8ff;
+  border-bottom: 1px solid var(--border);
+}
+
+.container.dark .requests td { color: #cbe7ff; border-bottom-color: #071622; }
+
+/* Ensure table surface is dark */
+.container.dark .requests {
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+  border-radius: 6px;
+}
+
+/* Ensure calendar surface is dark */
+.container.dark .calendar {
+  background: linear-gradient(180deg, var(--surface-1), var(--surface-2));
+  border: 1px solid var(--card-border);
+}
+
+/* Body / page background when dark */
+body.dark {
+  background: #071028;
+  color: #e6eef8;
+}
+
+/* also ensure any calendar grid area is darker */
+body.dark .cal-grid { background: transparent }
+
+/* Ensure the whole page is dark for the login screen as well */
+body.login-dark {
+  background: #07111a;
+  color: #e6eef8;
+}
+
+body.login-dark .container {
+  background: transparent;
+}
+
+.container.dark .logout-btn {
+  background: linear-gradient(180deg,#1d3a5a,#15324a);
+  color: #e6f0ff;
+  border: 1px solid #163246;
+}
+
+.container.dark .btn.primary { background: linear-gradient(180deg,var(--accent),#0b8f8e); color: #021418; }
+.container.dark .btn.secondary { background: linear-gradient(180deg,#b91c1c,#991515); color: #fff; }
+
+.container.dark .badge.approved { background: #133e26; color: #a7f0bf; }
+.container.dark .badge.rejected { background: #3b1010; color: #ffd6d6; }
+.container.dark .badge.pending { background: #2b2410; color: #ffeab6; }
+
+.container.dark input, .container.dark .form input {
+  background: #071827;
+  border: 1px solid #12303a;
+  color: var(--text);
+}
+.container.dark input:focus, .container.dark .form input:focus {
+  outline: none; box-shadow: 0 0 0 3px rgba(37,99,235,0.12); border-color: var(--accent);
+}
+
+.container.dark select, .container.dark .recurring-select {
+  background: #071827;
+  border: 1px solid #12303a;
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.container.dark select:focus, .container.dark .recurring-select:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(37,99,235,0.12);
+  border-color: var(--accent);
+}
+.container.dark select option {
+  background: #0d1620;
+  color: var(--text);
+}
+
+.recurring-select {
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+.recurring-select:focus {
+  outline: none;
+  border-color: #0078d4;
+  box-shadow: 0 0 0 2px rgba(0,120,212,0.1);
+}
+
+.container.dark .theme-toggle { border-color: #233545; color: #cfe8ff; background: rgba(255,255,255,0.02); }
+
+.container.dark .message.success { background: rgba(22,163,74,0.08); color: #aee6c2; }
+.container.dark .message.error { background: rgba(239,68,68,0.08); color: #ffc6c6; }
+
+/* small tweaks for contrast */
+.container.dark .cal-cell .cal-event-title { opacity: 0.95 }
+.container.dark .requests tr:hover { background: rgba(255,255,255,0.02); }
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.user-info {
+  color: #666;
+  font-size: 14px;
+}
+
+.tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  border-bottom: 2px solid #e5e5e5;
+}
+
+.tabs button {
+  background: none;
+  border: none;
+  padding: 12px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #666;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -2px;
+  transition: all 0.2s;
+}
+
+.tabs button:hover {
+  color: #0078d4;
+}
+
+.tabs button.active {
+  color: #0078d4;
+  border-bottom-color: #0078d4;
+}
+
+.card {
+  background: white;
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  margin-bottom: 20px;
+}
+
+.login-card {
+  max-width: 400px;
+  margin: 60px auto;
+  background: white;
+  border-radius: 8px;
+  padding: 32px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+/* Login card: always dark mode (fixed) */
+.login-card {
+  background: linear-gradient(180deg, #0d1622, #07121a);
+  color: #e6eef8;
+  border: 1px solid #13242e;
+  box-shadow: 0 6px 24px rgba(3,6,12,0.6);
+}
+.login-card h2 { color: #e6eef8 }
+.login-card .form input {
+  background: #071827;
+  border: 1px solid #12303a;
+  color: #dbeeff;
+}
+.login-card .form button {
+  background: linear-gradient(180deg,var(--accent, #0ea5a4), #0b8f8e);
+  color: #021418;
+}
+.login-card .message.error { background: rgba(239,68,68,0.06); color: #ffc6c6 }
+
+.login-card h2 {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.form input {
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.form input:focus {
+  outline: none;
+  border-color: #0078d4;
+  box-shadow: 0 0 0 2px rgba(0,120,212,0.1);
+}
+
+.form button,
+button {
+  padding: 10px 16px;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.form button {
+  background: #0078d4;
+  color: white;
+}
+
+.form button:hover {
+  background: #106ebe;
+}
+
+/* Modal overlay used by login/forgot/change-password modals */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.45);
+  z-index: 1000;
+  padding: 20px;
+}
+
+.modal {
+  width: 100%;
+  max-width: 420px;
+  border-radius: 10px;
+  padding: 20px;
+}
+
+/* Make the modal visually match the login-card */
+.modal.login-card {
+  margin: 0;
+  padding: 24px;
+}
+
+.modal .form input { background: #071827; border: 1px solid #12303a; color: #dbeeff }
+
+.modal .form button { min-width: 100px }
+
+/* Ghost/opaque button style */
+.btn.ghost {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.06);
+  color: inherit;
+  opacity: 0.9;
+}
+
+.btn.ghost:hover { opacity: 1 }
+
+.container.dark .btn.ghost { border-color: rgba(255,255,255,0.06); color: var(--text); }
+.btn.ghost:disabled { opacity: 0.5 }
+
+
+.calendar {
+  border: 1px solid #ddd;
+  padding: 16px;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 6px;
+  background: white;
+}
+
+.cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.cal-head button {
+  background: #f0f0f0;
+  border: 1px solid #ddd;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+/* Dark-mode overrides for calendar navigation buttons */
+.container.dark .cal-head button {
+  background: linear-gradient(180deg, #0f2734, #071523);
+  border: 1px solid #113043;
+  color: var(--text);
+}
+.container.dark .cal-head button:hover {
+  background: linear-gradient(180deg, #163a4c, #0b2a39);
+  border-color: var(--accent);
+}
+.container.dark .cal-head button:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(14,165,164,0.12);
+}
+
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cal-cell {
+  min-height: 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 8px;
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 13px;
+  position: relative;
+}
+
+.cal-cell.head {
+  font-weight: 600;
+  color: #666;
+  background: transparent;
+  cursor: default;
+}
+
+.cal-cell.empty {
+  background: transparent;
+  cursor: default;
+}
+
+.cal-cell:not(.head):not(.empty) {
+  border: 1px solid #e5e5e5;
+  background: white;
+  transition: all 0.12s ease-in-out;
+}
+
+.cal-cell:not(.head):not(.empty):hover {
+  background: #f8fbff;
+  border-color: #cfe8ff;
+  transform: translateY(-2px);
+}
+
+.cal-cell.selected {
+  background: #0078d4;
+  color: white;
+  border-color: #0078d4;
+  font-weight: 600;
+}
+
+/* Recurring day styling */
+.cal-cell.recurring-day {
+  border: 2px solid #52b788;
+  background: linear-gradient(180deg, rgba(82,183,136,0.1), rgba(82,183,136,0.05));
+}
+
+.cal-cell.recurring-day:hover {
+  background: linear-gradient(180deg, rgba(82,183,136,0.15), rgba(82,183,136,0.1));
+  border-color: #40916c;
+}
+
+.recurring-indicator {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  font-size: 14px;
+  color: #40a05b;
+  font-weight: 600;
+}
+
+.cal-cell .cal-event-dot {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #0078d4;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.12);
+}
+
+/* Responsive rules */
+@media (max-width: 1024px) {
+  .container { padding: 16px; }
+  h1 { font-size: 24px; }
+  h2 { font-size: 18px; }
+  .tabs button { padding: 10px 12px; font-size: 13px }
+  .card { padding: 18px }
+  .cal-cell { min-height: 64px; padding: 6px }
+  .cal-event-title { font-size: 11px }
+  .requests th, .requests td { padding: 10px }
+}
+
+@media (max-width: 768px) {
+  .container { padding: 12px; max-width: 100%; }
+  h1 { font-size: 20px }
+  .tabs { gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch }
+  .tabs button { white-space: nowrap; padding: 10px 12px; font-size: 13px }
+  .header-top { flex-direction: column; align-items: flex-start; gap: 12px }
+  .header-right { gap: 8px }
+  .user-info { display: none }
+  .logout-btn { padding: 8px 10px; font-size: 13px }
+
+  /* Calendar smaller cells */
+  .cal-grid { gap: 6px }
+  .cal-cell { min-height: 56px; padding: 6px; font-size: 12px }
+  .cal-cell .cal-event-title { font-size: 10px; padding: 3px 6px }
+
+  /* Make requests table horizontally scrollable on small screens */
+  .requests { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch }
+  .requests table, .requests thead, .requests tbody, .requests th, .requests td, .requests tr { display: table; }
+  .requests th, .requests td { white-space: nowrap }
+}
+
+@media (max-width: 480px) {
+  .container { padding: 8px }
+  h1 { font-size: 18px }
+  .card { padding: 14px }
+  .tabs button { padding: 8px 10px; font-size: 12px }
+  .cal-cell { min-height: 48px; padding: 6px; font-size: 11px }
+  .cal-head strong { font-size: 16px }
+  .cal-head button { padding: 6px 8px }
+
+  /* Compact requests layout: show rows as stacked cards */
+  .requests { border-radius: 6px }
+  .requests tbody tr { display: block; border-bottom: 1px solid rgba(0,0,0,0.04); margin-bottom: 8px }
+  .requests tbody tr td { display: block; padding: 10px; border-bottom: none }
+  .requests thead { display: none }
+}
+
+.cal-event-title {
+  margin-top: 6px;
+  background: #0078d4;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cal-cell.has-event {
+  background: linear-gradient(180deg, #fbfffb 0%, #ffffff 100%);
+}
+
+.requests {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 16px;
+  background: white;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.requests th {
+  background: #f5f5f5;
+  padding: 12px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 13px;
+  color: #333;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.requests td {
+  padding: 12px;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 14px;
+}
+
+.requests tr:last-child td {
+  border-bottom: none;
+}
+
+.requests tr:hover {
+  background: #fafafa;
+}
+
+.cal-cell .cal-event-dot {
+  display: none;
+}
+
+.badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.badge.approved {
+  background: #dcf8e8;
+  color: #157245;
+}
+
+.badge.rejected {
+  background: #fcd5d5;
+  color: #ae2a19;
+}
+
+.badge.pending {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  padding: 8px 14px;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn.primary {
+  background: #0078d4;
+  color: white;
+}
+
+.btn.primary:hover {
+  background: #106ebe;
+}
+
+.btn.secondary {
+  background: #ef4444;
+  color: white;
+}
+
+.btn.secondary:hover {
+  background: #dc2626;
+}
+
+.btn.danger {
+  background: #6b7280;
+  color: #fff;
+  padding: 6px 8px;
+  min-width: 36px;
+}
+.btn.danger:hover {
+  background: #52545a;
+}
+
+.col-delete {
+  width: 48px;
+  text-align: center;
+  vertical-align: middle;
+}
+.col-delete .btn {
+  padding: 6px 6px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.message {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.message.success {
+  background: #dcf8e8;
+  color: #157245;
+}
+
+.message.error {
+  background: #fcd5d5;
+  color: #ae2a19;
+}
+
+.logout-btn {
+  background: #0078d4;
+  color: white;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.logout-btn:hover {
+  background: #106ebe;
+}
+
+/* Selected calendar cell: green border and subtle glow */
+.cal-cell.selected {
+  border-color: #16a34a !important;
+  box-shadow: 0 0 0 3px rgba(22,163,74,0.08);
+}
+
+.container.dark .cal-cell.selected {
+  border-color: var(--success) !important;
+  box-shadow: 0 0 0 4px rgba(22,163,74,0.12);
+}
+
+/* Ensure the day number is visible when a cell is selected */
+.cal-cell.selected > div {
+  color: #fff !important;
+}
+.container.dark .cal-cell.selected > div {
+  color: #fff !important;
+}
+
+/* More specific rule targeting the first child (the day number) to avoid overrides */
+.cal-cell.selected div:first-child, .cal-cell.selected > div:first-child {
+  color: #ffffff !important;
+  transition: color 120ms ease-in-out;
+}
+.container.dark .cal-cell.selected div:first-child {
+  color: #ffffff !important;
+}
+
+/* Force selected cell visuals (highest priority) */
+.cal-cell.selected {
+  background: #0078d4 !important;
+  color: #ffffff !important;
+}
+.cal-cell.selected > div:first-child {
+  color: #ffffff !important;
+  font-weight: 700 !important;
+}
+.container.dark .cal-cell.selected {
+  background: var(--accent) !important;
+  color: #ffffff !important;
+}
+.container.dark .cal-cell.selected > div:first-child {
+  color: #ffffff !important;
+  font-weight: 700 !important;
+}
