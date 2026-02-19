@@ -61,6 +61,7 @@ app.MapGet("/", () => Results.Ok(new { message = "SmartWork API" }));
 app.MapPost("/auth/login", (LoginDto dto) =>
 {
     if (dto == null) return Results.BadRequest();
+    Console.WriteLine($"[LOGIN ATTEMPT] usernames saved in db: {string.Join(", ", store.Users.Select(u => u.Username))}");
     var user = store.Users.FirstOrDefault(u => u.Username == dto.Username);
     if (user == null) return Results.Unauthorized();
 
