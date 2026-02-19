@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Hosting;
 using System.Security.Cryptography;
 using System.Text;
+using System.Net.Sockets;
 using MailKit.Net.Smtp;
 using MailKit.Security;
 using MimeKit;
@@ -50,6 +51,8 @@ if (string.IsNullOrWhiteSpace(databaseUrl))
 
 var dbPath = NormalizeDatabaseUrl(databaseUrl);
 Console.WriteLine("[DB CONFIG] Using PostgreSQL from DATABASE_URL");
+LogDbConnectionAttempt(dbPath, "startup-check");
+TryOpenDbConnection(dbPath);
 var store = DataStore.LoadOrCreate(dbPath);
 var sessions = new ConcurrentDictionary<string, string>(); // token -> username
 
@@ -509,6 +512,46 @@ static string NormalizeDatabaseUrl(string databaseUrl)
     return builder.ConnectionString;
 }
 
+static void LogDbConnectionAttempt(string connectionString, string phase)
+{
+    try
+    {
+        var csb = new NpgsqlConnectionStringBuilder(connectionString);
+        Console.WriteLine($"[DB {phase}] host={csb.Host};port={csb.Port};db={csb.Database};user={csb.Username};ssl={csb.SslMode};timeout={csb.Timeout}s");
+    }
+    catch
+    {
+        Console.WriteLine($"[DB {phase}] unable to parse connection string");
+    }
+}
+
+static void TryOpenDbConnection(string connectionString)
+{
+    try
+    {
+        using var conn = new NpgsqlConnection(connectionString);
+        conn.Open();
+        Console.WriteLine("[DB startup-check] connection opened successfully");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[DB startup-check ERROR] {ex.GetType().Name}: {ex.Message}");
+        if (ex is PostgresException pg)
+        {
+            Console.WriteLine($"[DB startup-check ERROR] sqlstate={pg.SqlState}; severity={pg.Severity}; detail={pg.Detail}; hint={pg.Hint}");
+        }
+        if (ex is NpgsqlException npg && npg.InnerException != null)
+        {
+            Console.WriteLine($"[DB startup-check ERROR] inner={npg.InnerException.GetType().Name}: {npg.InnerException.Message}");
+        }
+        if (ex.InnerException is SocketException sock)
+        {
+            Console.WriteLine($"[DB startup-check ERROR] socket={sock.SocketErrorCode}");
+        }
+        throw;
+    }
+}
+
 User? GetUserFromRequest(HttpRequest req)
 {
     if (!req.Headers.TryGetValue("Authorization", out var val)) return null;
@@ -617,9 +660,17 @@ public class DataStore
 
             tx.Commit();
         }
+        catch (PostgresException ex)
+        {
+            LogDbException("SAVE", dbPath, ex);
+        }
+        catch (NpgsqlException ex)
+        {
+            LogDbException("SAVE", dbPath, ex);
+        }
         catch (Exception ex)
         {
-            Console.WriteLine($"[DB SAVE ERROR] {ex.Message}. Ensure PostgreSQL tables already exist.");
+            LogDbException("SAVE", dbPath, ex);
         }
     }
 
@@ -695,12 +746,52 @@ public class DataStore
             // Compute NextId
             ds.NextId = ds.Requests.Any() ? ds.Requests.Max(r => r.Id) : 0;
         }
+        catch (PostgresException ex)
+        {
+            LogDbException("LOAD", dbPath, ex);
+        }
+        catch (NpgsqlException ex)
+        {
+            LogDbException("LOAD", dbPath, ex);
+        }
         catch (Exception ex)
         {
-            Console.WriteLine($"[DB LOAD ERROR] {ex.Message}. Ensure PostgreSQL tables already exist.");
+            LogDbException("LOAD", dbPath, ex);
         }
 
         return ds;
+    }
+
+    private static void LogDbException(string phase, string connectionString, Exception ex)
+    {
+        try
+        {
+            var csb = new NpgsqlConnectionStringBuilder(connectionString);
+            Console.WriteLine($"[DB {phase} ERROR] host={csb.Host};port={csb.Port};db={csb.Database};user={csb.Username};ssl={csb.SslMode};timeout={csb.Timeout}s");
+        }
+        catch
+        {
+            Console.WriteLine($"[DB {phase} ERROR] unable to parse connection string");
+        }
+
+        Console.WriteLine($"[DB {phase} ERROR] {ex.GetType().Name}: {ex.Message}");
+
+        if (ex is PostgresException pg)
+        {
+            Console.WriteLine($"[DB {phase} ERROR] sqlstate={pg.SqlState}; severity={pg.Severity}; detail={pg.Detail}; hint={pg.Hint}; where={pg.Where}; schema={pg.SchemaName}; table={pg.TableName}; column={pg.ColumnName}");
+        }
+
+        if (ex is NpgsqlException npg && npg.InnerException != null)
+        {
+            Console.WriteLine($"[DB {phase} ERROR] inner={npg.InnerException.GetType().Name}: {npg.InnerException.Message}");
+        }
+
+        if (ex.InnerException is SocketException sock)
+        {
+            Console.WriteLine($"[DB {phase} ERROR] socket={sock.SocketErrorCode}");
+        }
+
+        Console.WriteLine($"[DB {phase} ERROR] stack={ex.StackTrace}");
     }
 }
 
