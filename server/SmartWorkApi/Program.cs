@@ -12,7 +12,7 @@ using System.Text;
 using MailKit.Net.Smtp;
 using MailKit.Security;
 using MimeKit;
-using Microsoft.Data.Sqlite;
+using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddCors();
@@ -42,20 +42,14 @@ app.UseCors(policy => policy
     .AllowAnyMethod()
     .AllowCredentials());
 
-// Database: currently SQLite-backed.
-// If DATABASE_URL points to PostgreSQL, log a warning and keep using SQLite path.
 var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
-var configuredSqlitePath = Environment.GetEnvironmentVariable("SQLITE_DB_PATH");
-var dbPath = string.IsNullOrWhiteSpace(configuredSqlitePath)
-    ? Path.Combine(AppContext.BaseDirectory, "data.db")
-    : configuredSqlitePath;
-
-if (!string.IsNullOrEmpty(databaseUrl) && databaseUrl.StartsWith("postgresql", StringComparison.OrdinalIgnoreCase))
+if (string.IsNullOrWhiteSpace(databaseUrl))
 {
-    Console.WriteLine("[DB CONFIG] DATABASE_URL is PostgreSQL, but this API currently persists on SQLite. Using SQLITE_DB_PATH/data.db.");
+    throw new InvalidOperationException("DATABASE_URL environment variable is required.");
 }
 
-Console.WriteLine($"[DB CONFIG] SQLite path: {dbPath}");
+var dbPath = NormalizeDatabaseUrl(databaseUrl);
+Console.WriteLine("[DB CONFIG] Using PostgreSQL from DATABASE_URL");
 var store = DataStore.LoadOrCreate(dbPath);
 var sessions = new ConcurrentDictionary<string, string>(); // token -> username
 
@@ -477,6 +471,44 @@ app.MapDelete("/recurring-requests/{id}", (HttpRequest req, int id) =>
 
 app.Run();
 
+static string NormalizeDatabaseUrl(string databaseUrl)
+{
+    if (databaseUrl.StartsWith("Host=", StringComparison.OrdinalIgnoreCase))
+    {
+        return databaseUrl;
+    }
+
+    if (!databaseUrl.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase)
+        && !databaseUrl.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException("DATABASE_URL format not supported. Use postgres://... or Host=... format.");
+    }
+
+    var uri = new Uri(databaseUrl);
+    var userInfo = uri.UserInfo.Split(':', 2);
+    if (userInfo.Length != 2)
+    {
+        throw new InvalidOperationException("DATABASE_URL is missing username or password.");
+    }
+
+    var username = Uri.UnescapeDataString(userInfo[0]);
+    var password = Uri.UnescapeDataString(userInfo[1]);
+    var database = uri.AbsolutePath.Trim('/');
+
+    var builder = new NpgsqlConnectionStringBuilder
+    {
+        Host = uri.Host,
+        Port = uri.Port,
+        Database = database,
+        Username = username,
+        Password = password,
+        SslMode = SslMode.Require,
+        TrustServerCertificate = true
+    };
+
+    return builder.ConnectionString;
+}
+
 User? GetUserFromRequest(HttpRequest req)
 {
     if (!req.Headers.TryGetValue("Authorization", out var val)) return null;
@@ -523,100 +555,63 @@ public class DataStore
     public List<Request> Requests { get; set; } = new List<Request>();
     public List<RecurringRequest> RecurringRequests { get; set; } = new List<RecurringRequest>();
     public int NextId = 0;
-    // Database-backed store (SQLite). `path` is the sqlite file path.
+        // Database-backed store (PostgreSQL). `dbPath` is a connection string.
     public void Save(string dbPath)
     {
         try
         {
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
+                        using var conn = new NpgsqlConnection(dbPath);
             conn.Open();
             using var tx = conn.BeginTransaction();
-            // Create tables if they don't exist
+
             var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
-            cmd.CommandText = @"
-CREATE TABLE IF NOT EXISTS Users (
-  Username TEXT PRIMARY KEY,
-  Password TEXT,
-  PasswordHash TEXT,
-  PasswordSetAt TEXT,
-  ForcePasswordChange INTEGER,
-  Role TEXT,
-  DisplayName TEXT,
-  Email TEXT,
-  Theme TEXT
-);
-CREATE TABLE IF NOT EXISTS Requests (
-  Id INTEGER PRIMARY KEY,
-  EmployeeUsername TEXT,
-  EmployeeName TEXT,
-  Date TEXT,
-  Status TEXT,
-  DecisionBy TEXT,
-  DecisionAt TEXT
-);
-CREATE TABLE IF NOT EXISTS RecurringRequests (
-  Id INTEGER PRIMARY KEY,
-  EmployeeUsername TEXT,
-  EmployeeName TEXT,
-  DayOfWeek INTEGER,
-  DayName TEXT,
-  Status TEXT,
-  DecisionBy TEXT,
-  DecisionAt TEXT
-);
-";
+
+                        cmd.CommandText = "DELETE FROM users; DELETE FROM requests; DELETE FROM recurring_requests;";
             cmd.ExecuteNonQuery();
 
-            // Clear tables and re-insert (simple approach)
-            cmd.CommandText = "DELETE FROM Users; DELETE FROM Requests; DELETE FROM RecurringRequests;";
-            cmd.ExecuteNonQuery();
-
-            // Insert users
             foreach (var u in Users)
             {
-                cmd.CommandText = "INSERT INTO Users (Username, Password, PasswordHash, PasswordSetAt, ForcePasswordChange, Role, DisplayName, Email, Theme) VALUES ($u, $p, $ph, $ps, $f, $r, $d, $e, $t);";
+                                cmd.CommandText = "INSERT INTO users (username, password, passwordhash, passwordsetat, forcepasswordchange, role, displayname, email, theme) VALUES (@u, @p, @ph, @ps, @f, @r, @d, @e, @t);";
                 cmd.Parameters.Clear();
-                cmd.Parameters.AddWithValue("$u", u.Username);
-                cmd.Parameters.AddWithValue("$p", u.Password ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$ph", u.PasswordHash ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$ps", u.PasswordSetAt?.ToString("o") ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$f", u.ForcePasswordChange ? 1 : 0);
-                cmd.Parameters.AddWithValue("$r", u.Role ?? "Employee");
-                cmd.Parameters.AddWithValue("$d", u.DisplayName ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$e", u.Email ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$t", u.Theme ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@u", u.Username);
+                                cmd.Parameters.AddWithValue("@p", u.Password ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@ph", u.PasswordHash ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@ps", u.PasswordSetAt ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@f", u.ForcePasswordChange);
+                                cmd.Parameters.AddWithValue("@r", u.Role ?? "Employee");
+                                cmd.Parameters.AddWithValue("@d", u.DisplayName ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@e", u.Email ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@t", u.Theme ?? (object)DBNull.Value);
                 cmd.ExecuteNonQuery();
             }
 
-            // Insert requests
             foreach (var r in Requests)
             {
-                cmd.CommandText = "INSERT INTO Requests (Id, EmployeeUsername, EmployeeName, Date, Status, DecisionBy, DecisionAt) VALUES ($id, $u, $n, $d, $s, $db, $da);";
+                                cmd.CommandText = "INSERT INTO requests (id, employeeusername, employeename, date, status, decisionby, decisionat) VALUES (@id, @u, @n, @d, @s, @db, @da);";
                 cmd.Parameters.Clear();
-                cmd.Parameters.AddWithValue("$id", r.Id);
-                cmd.Parameters.AddWithValue("$u", r.EmployeeUsername);
-                cmd.Parameters.AddWithValue("$n", r.EmployeeName ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$d", r.Date.ToString("o"));
-                cmd.Parameters.AddWithValue("$s", r.Status ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$db", r.DecisionBy ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$da", r.DecisionAt?.ToString("o") ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@id", r.Id);
+                                cmd.Parameters.AddWithValue("@u", r.EmployeeUsername);
+                                cmd.Parameters.AddWithValue("@n", r.EmployeeName ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@d", r.Date);
+                                cmd.Parameters.AddWithValue("@s", r.Status ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@db", r.DecisionBy ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@da", r.DecisionAt ?? (object)DBNull.Value);
                 cmd.ExecuteNonQuery();
             }
 
-            // Insert recurring
             foreach (var rr in RecurringRequests)
             {
-                cmd.CommandText = "INSERT INTO RecurringRequests (Id, EmployeeUsername, EmployeeName, DayOfWeek, DayName, Status, DecisionBy, DecisionAt) VALUES ($id, $u, $n, $dw, $dn, $s, $db, $da);";
+                                cmd.CommandText = "INSERT INTO recurring_requests (id, employeeusername, employeename, dayofweek, dayname, status, decisionby, decisionat) VALUES (@id, @u, @n, @dw, @dn, @s, @db, @da);";
                 cmd.Parameters.Clear();
-                cmd.Parameters.AddWithValue("$id", rr.Id);
-                cmd.Parameters.AddWithValue("$u", rr.EmployeeUsername);
-                cmd.Parameters.AddWithValue("$n", rr.EmployeeName ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$dw", rr.DayOfWeek);
-                cmd.Parameters.AddWithValue("$dn", rr.DayName ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$s", rr.Status ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$db", rr.DecisionBy ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("$da", rr.DecisionAt?.ToString("o") ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@id", rr.Id);
+                                cmd.Parameters.AddWithValue("@u", rr.EmployeeUsername);
+                                cmd.Parameters.AddWithValue("@n", rr.EmployeeName ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@dw", rr.DayOfWeek);
+                                cmd.Parameters.AddWithValue("@dn", rr.DayName ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@s", rr.Status ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@db", rr.DecisionBy ?? (object)DBNull.Value);
+                                cmd.Parameters.AddWithValue("@da", rr.DecisionAt ?? (object)DBNull.Value);
                 cmd.ExecuteNonQuery();
             }
 
@@ -624,7 +619,7 @@ CREATE TABLE IF NOT EXISTS RecurringRequests (
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[DB SAVE ERROR] {ex.Message}");
+            Console.WriteLine($"[DB SAVE ERROR] {ex.Message}. Ensure PostgreSQL tables already exist.");
         }
     }
 
@@ -633,45 +628,11 @@ CREATE TABLE IF NOT EXISTS RecurringRequests (
         var ds = new DataStore();
         try
         {
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
+                        using var conn = new NpgsqlConnection(dbPath);
             conn.Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-CREATE TABLE IF NOT EXISTS Users (
-  Username TEXT PRIMARY KEY,
-  Password TEXT,
-  PasswordHash TEXT,
-  PasswordSetAt TEXT,
-  ForcePasswordChange INTEGER,
-  Role TEXT,
-  DisplayName TEXT,
-  Email TEXT,
-  Theme TEXT
-);
-CREATE TABLE IF NOT EXISTS Requests (
-  Id INTEGER PRIMARY KEY,
-  EmployeeUsername TEXT,
-  EmployeeName TEXT,
-  Date TEXT,
-  Status TEXT,
-  DecisionBy TEXT,
-  DecisionAt TEXT
-);
-CREATE TABLE IF NOT EXISTS RecurringRequests (
-  Id INTEGER PRIMARY KEY,
-  EmployeeUsername TEXT,
-  EmployeeName TEXT,
-  DayOfWeek INTEGER,
-  DayName TEXT,
-  Status TEXT,
-  DecisionBy TEXT,
-  DecisionAt TEXT
-);
-";
-            cmd.ExecuteNonQuery();
 
-            // Load users
-            cmd.CommandText = "SELECT Username, Password, PasswordHash, PasswordSetAt, ForcePasswordChange, Role, DisplayName, Email, Theme FROM Users";
+                        cmd.CommandText = "SELECT username, password, passwordhash, passwordsetat, forcepasswordchange, role, displayname, email, theme FROM users";
             using (var rdr = cmd.ExecuteReader())
             {
                 while (rdr.Read())
@@ -681,8 +642,8 @@ CREATE TABLE IF NOT EXISTS RecurringRequests (
                         Username = rdr.GetString(0),
                         Password = rdr.IsDBNull(1) ? null : rdr.GetString(1),
                         PasswordHash = rdr.IsDBNull(2) ? null : rdr.GetString(2),
-                        PasswordSetAt = rdr.IsDBNull(3) ? null : DateTime.Parse(rdr.GetString(3)),
-                        ForcePasswordChange = !rdr.IsDBNull(4) && rdr.GetInt32(4) == 1,
+                                                PasswordSetAt = rdr.IsDBNull(3) ? null : rdr.GetFieldValue<DateTime>(3),
+                                                ForcePasswordChange = !rdr.IsDBNull(4) && rdr.GetBoolean(4),
                         Role = rdr.IsDBNull(5) ? "Employee" : rdr.GetString(5),
                         DisplayName = rdr.IsDBNull(6) ? null : rdr.GetString(6),
                         Email = rdr.IsDBNull(7) ? null : rdr.GetString(7),
@@ -692,8 +653,7 @@ CREATE TABLE IF NOT EXISTS RecurringRequests (
                 }
             }
 
-            // Load requests
-            cmd.CommandText = "SELECT Id, EmployeeUsername, EmployeeName, Date, Status, DecisionBy, DecisionAt FROM Requests";
+            cmd.CommandText = "SELECT id, employeeusername, employeename, date, status, decisionby, decisionat FROM requests";
             using (var rdr2 = cmd.ExecuteReader())
             {
                 while (rdr2.Read())
@@ -703,17 +663,16 @@ CREATE TABLE IF NOT EXISTS RecurringRequests (
                         Id = rdr2.GetInt32(0),
                         EmployeeUsername = rdr2.IsDBNull(1) ? "" : rdr2.GetString(1),
                         EmployeeName = rdr2.IsDBNull(2) ? null : rdr2.GetString(2),
-                        Date = DateTime.Parse(rdr2.GetString(3)),
+                        Date = rdr2.GetFieldValue<DateTime>(3),
                         Status = rdr2.IsDBNull(4) ? null : rdr2.GetString(4),
                         DecisionBy = rdr2.IsDBNull(5) ? null : rdr2.GetString(5),
-                        DecisionAt = rdr2.IsDBNull(6) ? null : DateTime.Parse(rdr2.GetString(6))
+                        DecisionAt = rdr2.IsDBNull(6) ? null : rdr2.GetFieldValue<DateTime>(6)
                     };
                     ds.Requests.Add(r);
                 }
             }
 
-            // Load recurring
-            cmd.CommandText = "SELECT Id, EmployeeUsername, EmployeeName, DayOfWeek, DayName, Status, DecisionBy, DecisionAt FROM RecurringRequests";
+            cmd.CommandText = "SELECT id, employeeusername, employeename, dayofweek, dayname, status, decisionby, decisionat FROM recurring_requests";
             using (var rdr3 = cmd.ExecuteReader())
             {
                 while (rdr3.Read())
@@ -727,7 +686,7 @@ CREATE TABLE IF NOT EXISTS RecurringRequests (
                         DayName = rdr3.IsDBNull(4) ? null : rdr3.GetString(4),
                         Status = rdr3.IsDBNull(5) ? null : rdr3.GetString(5),
                         DecisionBy = rdr3.IsDBNull(6) ? null : rdr3.GetString(6),
-                        DecisionAt = rdr3.IsDBNull(7) ? null : DateTime.Parse(rdr3.GetString(7))
+                        DecisionAt = rdr3.IsDBNull(7) ? null : rdr3.GetFieldValue<DateTime>(7)
                     };
                     ds.RecurringRequests.Add(rr);
                 }
@@ -738,47 +697,10 @@ CREATE TABLE IF NOT EXISTS RecurringRequests (
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[DB LOAD ERROR] {ex.Message}");
+            Console.WriteLine($"[DB LOAD ERROR] {ex.Message}. Ensure PostgreSQL tables already exist.");
         }
 
-        EnsureDefaults(ds);
-        // Save initial state to DB if needed
-        ds.Save(dbPath);
         return ds;
-    }
-
-    private static void EnsureDefaults(DataStore ds)
-    {
-        if (!ds.Users.Any(u => u.Username == "admin"))
-        {
-            var tmp = PasswordHelper.GenerateTemporaryPassword(10);
-            ds.Users.Add(new User { Username = "admin", PasswordHash = PasswordHelper.HashPassword(tmp), Role = "Admin", DisplayName = "Administrator", Email = "paolo.bini@fos.it", PasswordSetAt = DateTime.UtcNow, ForcePasswordChange = true });
-            Console.WriteLine($"[INIT] admin temporary password: {tmp}");
-        }
-        if (!ds.Users.Any(u => u.Username == "dipendente"))
-        {
-            var tmp = PasswordHelper.GenerateTemporaryPassword(10);
-            ds.Users.Add(new User { Username = "dipendente", PasswordHash = PasswordHelper.HashPassword(tmp), Role = "Employee", DisplayName = "Dipendente", Email = "paolo.bini@fos.it", PasswordSetAt = DateTime.UtcNow, ForcePasswordChange = true });
-            Console.WriteLine($"[INIT] dipendente temporary password: {tmp}");
-        }
-        if (ds.NextId <= 0)
-        {
-            ds.NextId = ds.Requests.Any() ? ds.Requests.Max(r => r.Id) : 0;
-        }
-        // Ensure existing users have an email set
-        foreach (var u in ds.Users)
-        {
-            if (string.IsNullOrWhiteSpace(u.Email)) u.Email = "paolo.bini@fos.it";
-            if (string.IsNullOrWhiteSpace(u.Theme)) u.Theme = "light";
-            // Upgrade legacy plain passwords to hashed and require password change
-            if (!string.IsNullOrEmpty(u.Password) && string.IsNullOrWhiteSpace(u.PasswordHash))
-            {
-                u.PasswordHash = PasswordHelper.HashPassword(u.Password);
-                u.PasswordSetAt = DateTime.UtcNow;
-                u.ForcePasswordChange = true;
-                u.Password = null;
-            }
-        }
     }
 }
 
