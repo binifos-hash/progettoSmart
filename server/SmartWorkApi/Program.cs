@@ -672,59 +672,65 @@ CREATE TABLE IF NOT EXISTS RecurringRequests (
 
             // Load users
             cmd.CommandText = "SELECT Username, Password, PasswordHash, PasswordSetAt, ForcePasswordChange, Role, DisplayName, Email, Theme FROM Users";
-            using var rdr = cmd.ExecuteReader();
-            while (rdr.Read())
+            using (var rdr = cmd.ExecuteReader())
             {
-                var u = new User
+                while (rdr.Read())
                 {
-                    Username = rdr.GetString(0),
-                    Password = rdr.IsDBNull(1) ? null : rdr.GetString(1),
-                    PasswordHash = rdr.IsDBNull(2) ? null : rdr.GetString(2),
-                    PasswordSetAt = rdr.IsDBNull(3) ? null : DateTime.Parse(rdr.GetString(3)),
-                    ForcePasswordChange = !rdr.IsDBNull(4) && rdr.GetInt32(4) == 1,
-                    Role = rdr.IsDBNull(5) ? "Employee" : rdr.GetString(5),
-                    DisplayName = rdr.IsDBNull(6) ? null : rdr.GetString(6),
-                    Email = rdr.IsDBNull(7) ? null : rdr.GetString(7),
-                    Theme = rdr.IsDBNull(8) ? "light" : rdr.GetString(8)
-                };
-                ds.Users.Add(u);
+                    var u = new User
+                    {
+                        Username = rdr.GetString(0),
+                        Password = rdr.IsDBNull(1) ? null : rdr.GetString(1),
+                        PasswordHash = rdr.IsDBNull(2) ? null : rdr.GetString(2),
+                        PasswordSetAt = rdr.IsDBNull(3) ? null : DateTime.Parse(rdr.GetString(3)),
+                        ForcePasswordChange = !rdr.IsDBNull(4) && rdr.GetInt32(4) == 1,
+                        Role = rdr.IsDBNull(5) ? "Employee" : rdr.GetString(5),
+                        DisplayName = rdr.IsDBNull(6) ? null : rdr.GetString(6),
+                        Email = rdr.IsDBNull(7) ? null : rdr.GetString(7),
+                        Theme = rdr.IsDBNull(8) ? "light" : rdr.GetString(8)
+                    };
+                    ds.Users.Add(u);
+                }
             }
 
             // Load requests
             cmd.CommandText = "SELECT Id, EmployeeUsername, EmployeeName, Date, Status, DecisionBy, DecisionAt FROM Requests";
-            using var rdr2 = cmd.ExecuteReader();
-            while (rdr2.Read())
+            using (var rdr2 = cmd.ExecuteReader())
             {
-                var r = new Request
+                while (rdr2.Read())
                 {
-                    Id = rdr2.GetInt32(0),
-                    EmployeeUsername = rdr2.IsDBNull(1) ? "" : rdr2.GetString(1),
-                    EmployeeName = rdr2.IsDBNull(2) ? null : rdr2.GetString(2),
-                    Date = DateTime.Parse(rdr2.GetString(3)),
-                    Status = rdr2.IsDBNull(4) ? null : rdr2.GetString(4),
-                    DecisionBy = rdr2.IsDBNull(5) ? null : rdr2.GetString(5),
-                    DecisionAt = rdr2.IsDBNull(6) ? null : DateTime.Parse(rdr2.GetString(6))
-                };
-                ds.Requests.Add(r);
+                    var r = new Request
+                    {
+                        Id = rdr2.GetInt32(0),
+                        EmployeeUsername = rdr2.IsDBNull(1) ? "" : rdr2.GetString(1),
+                        EmployeeName = rdr2.IsDBNull(2) ? null : rdr2.GetString(2),
+                        Date = DateTime.Parse(rdr2.GetString(3)),
+                        Status = rdr2.IsDBNull(4) ? null : rdr2.GetString(4),
+                        DecisionBy = rdr2.IsDBNull(5) ? null : rdr2.GetString(5),
+                        DecisionAt = rdr2.IsDBNull(6) ? null : DateTime.Parse(rdr2.GetString(6))
+                    };
+                    ds.Requests.Add(r);
+                }
             }
 
             // Load recurring
             cmd.CommandText = "SELECT Id, EmployeeUsername, EmployeeName, DayOfWeek, DayName, Status, DecisionBy, DecisionAt FROM RecurringRequests";
-            using var rdr3 = cmd.ExecuteReader();
-            while (rdr3.Read())
+            using (var rdr3 = cmd.ExecuteReader())
             {
-                var rr = new RecurringRequest
+                while (rdr3.Read())
                 {
-                    Id = rdr3.GetInt32(0),
-                    EmployeeUsername = rdr3.IsDBNull(1) ? "" : rdr3.GetString(1),
-                    EmployeeName = rdr3.IsDBNull(2) ? null : rdr3.GetString(2),
-                    DayOfWeek = rdr3.IsDBNull(3) ? 0 : rdr3.GetInt32(3),
-                    DayName = rdr3.IsDBNull(4) ? null : rdr3.GetString(4),
-                    Status = rdr3.IsDBNull(5) ? null : rdr3.GetString(5),
-                    DecisionBy = rdr3.IsDBNull(6) ? null : rdr3.GetString(6),
-                    DecisionAt = rdr3.IsDBNull(7) ? null : DateTime.Parse(rdr3.GetString(7))
-                };
-                ds.RecurringRequests.Add(rr);
+                    var rr = new RecurringRequest
+                    {
+                        Id = rdr3.GetInt32(0),
+                        EmployeeUsername = rdr3.IsDBNull(1) ? "" : rdr3.GetString(1),
+                        EmployeeName = rdr3.IsDBNull(2) ? null : rdr3.GetString(2),
+                        DayOfWeek = rdr3.IsDBNull(3) ? 0 : rdr3.GetInt32(3),
+                        DayName = rdr3.IsDBNull(4) ? null : rdr3.GetString(4),
+                        Status = rdr3.IsDBNull(5) ? null : rdr3.GetString(5),
+                        DecisionBy = rdr3.IsDBNull(6) ? null : rdr3.GetString(6),
+                        DecisionAt = rdr3.IsDBNull(7) ? null : DateTime.Parse(rdr3.GetString(7))
+                    };
+                    ds.RecurringRequests.Add(rr);
+                }
             }
 
             // Compute NextId
