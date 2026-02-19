@@ -42,18 +42,20 @@ app.UseCors(policy => policy
     .AllowAnyMethod()
     .AllowCredentials());
 
-// Read database connection from environment or use local SQLite for development
+// Database: currently SQLite-backed.
+// If DATABASE_URL points to PostgreSQL, log a warning and keep using SQLite path.
 var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
-string dbPath;
-if (!string.IsNullOrEmpty(databaseUrl) && databaseUrl.StartsWith("postgresql"))
+var configuredSqlitePath = Environment.GetEnvironmentVariable("SQLITE_DB_PATH");
+var dbPath = string.IsNullOrWhiteSpace(configuredSqlitePath)
+    ? Path.Combine(AppContext.BaseDirectory, "data.db")
+    : configuredSqlitePath;
+
+if (!string.IsNullOrEmpty(databaseUrl) && databaseUrl.StartsWith("postgresql", StringComparison.OrdinalIgnoreCase))
 {
-    // When using Postgres, we don't use local file path
-    dbPath = "postgres"; // marker - will be handled by DataStore logic if needed
+    Console.WriteLine("[DB CONFIG] DATABASE_URL is PostgreSQL, but this API currently persists on SQLite. Using SQLITE_DB_PATH/data.db.");
 }
-else
-{
-    dbPath = Path.Combine(AppContext.BaseDirectory, "data.db");
-}
+
+Console.WriteLine($"[DB CONFIG] SQLite path: {dbPath}");
 var store = DataStore.LoadOrCreate(dbPath);
 var sessions = new ConcurrentDictionary<string, string>(); // token -> username
 
@@ -105,10 +107,13 @@ app.MapPost("/auth/forgot-password", async (ForgotDto dto) =>
     user.ForcePasswordChange = true;
     store.Save(dbPath);
 
-    _ = Task.Run(async () => {
-        var emailService = new EmailService();
-    await emailService.SendTemporaryPasswordAsync(user.Email ?? "", user.Username, tmp);
-    });
+    var emailService = new EmailService();
+    var sent = await emailService.SendTemporaryPasswordAsync(user.Email ?? "", user.Username, tmp);
+    if (!sent)
+    {
+        return Results.Problem("Failed to send temporary password email. Check SMTP settings/logs.", statusCode: 500);
+    }
+
     return Results.Ok(new { message = "Temporary password sent" });
 });
 
@@ -856,8 +861,10 @@ public class EmailService
     {
         try
         {
+            var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
+            var smtpPassword = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
             var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SmartWork", "noreply@smartwork.local"));
+            message.From.Add(new MailboxAddress("SmartWork", smtpUsername));
             message.To.Add(new MailboxAddress("Admin", toEmail));
             message.Subject = "Nuova Richiesta di Smart Working";
 
@@ -874,11 +881,9 @@ Accedi al sistema per revisione e approvazione.";
             {
                 var host = "smtp.gmail.com";
                 var port = 587;
-                var username = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
-                var password = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
 
                 await client.ConnectAsync(host, port, SecureSocketOptions.StartTls);
-                await client.AuthenticateAsync(username, password);
+                await client.AuthenticateAsync(smtpUsername, smtpPassword);
                 await client.SendAsync(message);
                 await client.DisconnectAsync(true);
 
@@ -896,8 +901,10 @@ Accedi al sistema per revisione e approvazione.";
     {
         try
         {
+            var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
+            var smtpPassword = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
             var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SmartWork", "noreply@smartwork.local"));
+            message.From.Add(new MailboxAddress("SmartWork", smtpUsername));
             message.To.Add(new MailboxAddress(employeeName, toEmail));
             message.Subject = approved ? "Richiesta approvata" : "Richiesta rifiutata";
 
@@ -911,11 +918,9 @@ Accedi al sistema per revisione e approvazione.";
             {
                 var host = "smtp.gmail.com";
                 var port = 587;
-                var username = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
-                var password = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
 
                 await client.ConnectAsync(host, port, SecureSocketOptions.StartTls);
-                await client.AuthenticateAsync(username, password);
+                await client.AuthenticateAsync(smtpUsername, smtpPassword);
                 await client.SendAsync(message);
                 await client.DisconnectAsync(true);
 
@@ -928,12 +933,14 @@ Accedi al sistema per revisione e approvazione.";
         }
     }
 
-    public async Task SendTemporaryPasswordAsync(string toEmail, string username, string tempPassword)
+    public async Task<bool> SendTemporaryPasswordAsync(string toEmail, string username, string tempPassword)
     {
         try
         {
+            var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
+            var smtpPassword = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
             var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SmartWork", "noreply@smartwork.local"));
+            message.From.Add(new MailboxAddress("SmartWork", smtpUsername));
             message.To.Add(new MailboxAddress(username, toEmail));
             message.Subject = "Password temporanea SmartWork";
 
@@ -950,20 +957,21 @@ Effettua l'accesso e cambia la password al più presto.";
             {
                 var host = "smtp.gmail.com";
                 var port = 587;
-                var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
-                var smtpPassword = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
-
                 await client.ConnectAsync(host, port, SecureSocketOptions.StartTls);
                 await client.AuthenticateAsync(smtpUsername, smtpPassword);
                 await client.SendAsync(message);
                 await client.DisconnectAsync(true);
 
                 Console.WriteLine($"[EMAIL] Temporary password sent to {toEmail}");
+                return true;
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[EMAIL ERROR] Failed to send temporary password: {ex.Message}");
+            return false;
         }
+
+        return false;
     }
 }
