@@ -611,7 +611,7 @@ public class DataStore
             var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
 
-                        cmd.CommandText = "DELETE FROM users; DELETE FROM requests; DELETE FROM recurring_requests;";
+                        cmd.CommandText = "DELETE FROM users; DELETE FROM requests; DELETE FROM recurringrequests;";
             cmd.ExecuteNonQuery();
 
             foreach (var u in Users)
@@ -646,7 +646,7 @@ public class DataStore
 
             foreach (var rr in RecurringRequests)
             {
-                                cmd.CommandText = "INSERT INTO recurring_requests (id, employeeusername, employeename, dayofweek, dayname, status, decisionby, decisionat) VALUES (@id, @u, @n, @dw, @dn, @s, @db, @da);";
+                                cmd.CommandText = "INSERT INTO recurringrequests (id, employeeusername, employeename, dayofweek, dayname, status, decisionby, decisionat) VALUES (@id, @u, @n, @dw, @dn, @s, @db, @da);";
                 cmd.Parameters.Clear();
                                 cmd.Parameters.AddWithValue("@id", rr.Id);
                                 cmd.Parameters.AddWithValue("@u", rr.EmployeeUsername);
