@@ -856,6 +856,7 @@ public static class PasswordHelper
             Buffer.BlockCopy(combined, salt.Length, hash, 0, hash.Length);
             using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, 10000, HashAlgorithmName.SHA256);
             var testHash = pbkdf2.GetBytes(32);
+            Console.WriteLine($"[PASSWORD VERIFY] storedHash={Convert.ToBase64String(hash)}; computedHash={Convert.ToBase64String(testHash)}");
             return testHash.SequenceEqual(hash);
         } catch { return false; }
     }
