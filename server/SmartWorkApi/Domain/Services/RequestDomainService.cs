@@ -41,7 +41,7 @@ public class RequestDomainService
             Id = nextId,
             EmployeeUsername = user.Username,
             EmployeeName = string.IsNullOrWhiteSpace(user.DisplayName) ? user.Username : user.DisplayName,
-            Date = dto.Date.Date,
+            Date = EnsureUtcDate(dto.Date),
             Status = "Pending"
         };
 
@@ -55,6 +55,12 @@ public class RequestDomainService
         });
 
         return request;
+    }
+
+    // PostgreSQL timestamptz requires UTC DateTime values.
+    private static DateTime EnsureUtcDate(DateTime value)
+    {
+        return DateTime.SpecifyKind(value.Date, DateTimeKind.Utc);
     }
 
     public async Task<Request?> SetDecisionAsync(int id, bool approved, string adminUsername, AppDbContext db, CancellationToken cancellationToken = default)
