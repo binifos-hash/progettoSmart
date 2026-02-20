@@ -1,9 +1,18 @@
 using MailKit.Net.Smtp;
 using MailKit.Security;
 using MimeKit;
+using System.Globalization;
 
 public class EmailService
 {
+    private sealed class SmtpSettings
+    {
+        public string Host { get; init; } = "smtp.gmail.com";
+        public int Port { get; init; } = 587;
+        public SecureSocketOptions SecureSocketOptions { get; init; } = SecureSocketOptions.StartTls;
+        public int TimeoutMs { get; init; } = 15000;
+    }
+
     private static (string Username, string Password) GetCredentials()
     {
         var username = Environment.GetEnvironmentVariable("SMTP_USERNAME")
@@ -13,6 +22,65 @@ public class EmailService
             ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
 
         return (username, password);
+    }
+
+    private static SmtpSettings GetSmtpSettings()
+    {
+        var host = Environment.GetEnvironmentVariable("SMTP_HOST");
+        var portRaw = Environment.GetEnvironmentVariable("SMTP_PORT");
+        var secureRaw = Environment.GetEnvironmentVariable("SMTP_SECURE");
+        var timeoutRaw = Environment.GetEnvironmentVariable("SMTP_TIMEOUT_MS");
+
+        var port = 587;
+        if (!string.IsNullOrWhiteSpace(portRaw) && int.TryParse(portRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedPort))
+        {
+            port = parsedPort;
+        }
+
+        var timeoutMs = 15000;
+        if (!string.IsNullOrWhiteSpace(timeoutRaw) && int.TryParse(timeoutRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedTimeout))
+        {
+            timeoutMs = parsedTimeout;
+        }
+
+        return new SmtpSettings
+        {
+            Host = string.IsNullOrWhiteSpace(host) ? "smtp.gmail.com" : host,
+            Port = port,
+            TimeoutMs = timeoutMs,
+            SecureSocketOptions = ParseSecureSocketOptions(secureRaw)
+        };
+    }
+
+    private static SecureSocketOptions ParseSecureSocketOptions(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return SecureSocketOptions.StartTls;
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "auto" => SecureSocketOptions.Auto,
+            "ssl" => SecureSocketOptions.SslOnConnect,
+            "sslonconnect" => SecureSocketOptions.SslOnConnect,
+            "starttls" => SecureSocketOptions.StartTls,
+            "starttlswhenavailable" => SecureSocketOptions.StartTlsWhenAvailable,
+            "none" => SecureSocketOptions.None,
+            _ => SecureSocketOptions.StartTls
+        };
+    }
+
+    private static async Task SendEmailAsync(MimeMessage message, string username, string password)
+    {
+        var settings = GetSmtpSettings();
+
+        using var client = new SmtpClient
+        {
+            Timeout = settings.TimeoutMs
+        };
+
+        await client.ConnectAsync(settings.Host, settings.Port, settings.SecureSocketOptions);
+        await client.AuthenticateAsync(username, password);
+        await client.SendAsync(message);
+        await client.DisconnectAsync(true);
     }
 
     public async Task SendRequestNotificationAsync(string toEmail, string employeeName, string dateString)
@@ -35,15 +103,11 @@ Data: {dateString}
 Accedi al sistema per revisione e approvazione."
             }.ToMessageBody();
 
-            using var client = new SmtpClient();
-            await client.ConnectAsync("smtp.gmail.com", 587, SecureSocketOptions.StartTls);
-            await client.AuthenticateAsync(username, password);
-            await client.SendAsync(message);
-            await client.DisconnectAsync(true);
+            await SendEmailAsync(message, username, password);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[EMAIL ERROR] Failed to send notification: {ex.Message}");
+            Console.WriteLine($"[EMAIL ERROR] Failed to send notification: {ex.Message}; inner={ex.InnerException?.Message}");
         }
     }
 
@@ -64,15 +128,11 @@ Accedi al sistema per revisione e approvazione."
                     : $"La tua richiesta di smart working per il {dateString} è stata rifiutata da {decidedBy}."
             }.ToMessageBody();
 
-            using var client = new SmtpClient();
-            await client.ConnectAsync("smtp.gmail.com", 587, SecureSocketOptions.StartTls);
-            await client.AuthenticateAsync(username, password);
-            await client.SendAsync(message);
-            await client.DisconnectAsync(true);
+            await SendEmailAsync(message, username, password);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[EMAIL ERROR] Failed to send decision notification: {ex.Message}");
+            Console.WriteLine($"[EMAIL ERROR] Failed to send decision notification: {ex.Message}; inner={ex.InnerException?.Message}");
         }
     }
 
@@ -96,17 +156,13 @@ Password temporanea: {tempPassword}
 Effettua l'accesso e cambia la password al più presto."
             }.ToMessageBody();
 
-            using var client = new SmtpClient();
-            await client.ConnectAsync("smtp.gmail.com", 587, SecureSocketOptions.StartTls);
-            await client.AuthenticateAsync(smtpUsername, smtpPassword);
-            await client.SendAsync(message);
-            await client.DisconnectAsync(true);
+            await SendEmailAsync(message, smtpUsername, smtpPassword);
 
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[EMAIL ERROR] Failed to send temporary password: {ex.Message}");
+            Console.WriteLine($"[EMAIL ERROR] Failed to send temporary password: {ex.Message}; inner={ex.InnerException?.Message}");
             return false;
         }
     }
