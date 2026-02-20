@@ -1,22 +1,23 @@
-using System;
 using System.Collections.Concurrent;
-using System.Text.Json;
-using System.Text.Json.Serialization;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.Extensions.Hosting;
-using System.Security.Cryptography;
-using System.Text;
 using System.Net.Sockets;
-using MailKit.Net.Smtp;
-using MailKit.Security;
-using MimeKit;
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddCors();
+
+var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
+if (string.IsNullOrWhiteSpace(databaseUrl))
+{
+    throw new InvalidOperationException("DATABASE_URL environment variable is required.");
+}
+
+var connectionString = NormalizeDatabaseUrl(databaseUrl);
+LogDbConnectionAttempt(connectionString, "startup-check");
+TryOpenDbConnection(connectionString);
+
+builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(connectionString));
+
 var app = builder.Build();
 
 var allowedOrigins = Environment.GetEnvironmentVariable("ALLOWED_ORIGINS")
@@ -24,16 +25,8 @@ var allowedOrigins = Environment.GetEnvironmentVariable("ALLOWED_ORIGINS")
     .Select(o => o.Trim().TrimEnd('/'))
     .Where(o => !string.IsNullOrWhiteSpace(o))
     .Distinct(StringComparer.OrdinalIgnoreCase)
-    .ToArray();
+    .ToArray() ?? Array.Empty<string>();
 
-if (allowedOrigins == null || allowedOrigins.Length == 0)
-{
-    allowedOrigins = new string[0];
-}
-
-Console.WriteLine($"[CONFIG] Allowed origins: {(allowedOrigins.Length > 0 ? string.Join(", ", allowedOrigins) : "None")}");
-
-// Bind to all interfaces (0.0.0.0) for cloud deployment; read PORT from environment
 var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
 app.Urls.Add($"http://0.0.0.0:{port}");
 
@@ -43,67 +36,69 @@ app.UseCors(policy => policy
     .AllowAnyMethod()
     .AllowCredentials());
 
-var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
-if (string.IsNullOrWhiteSpace(databaseUrl))
-{
-    throw new InvalidOperationException("DATABASE_URL environment variable is required.");
-}
-
-var dbPath = NormalizeDatabaseUrl(databaseUrl);
-Console.WriteLine("[DB CONFIG] Using PostgreSQL from DATABASE_URL");
-LogDbConnectionAttempt(dbPath, "startup-check");
-TryOpenDbConnection(dbPath);
-var store = DataStore.LoadOrCreate(dbPath);
-var sessions = new ConcurrentDictionary<string, string>(); // token -> username
+var sessions = new ConcurrentDictionary<string, string>();
 
 app.MapGet("/", () => Results.Ok(new { message = "SmartWork API" }));
 
-app.MapPost("/auth/login", (LoginDto dto) =>
+app.MapPost("/auth/login", async (LoginDto dto, AppDbContext db) =>
 {
     if (dto == null) return Results.BadRequest();
-    Console.WriteLine($"[LOGIN ATTEMPT] usernames saved in db: {string.Join(", ", store.Users.Select(u => u.Username))}");
-    var user = store.Users.FirstOrDefault(u => u.Username == dto.Username);
+
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Username == dto.Username);
     if (user == null) return Results.Unauthorized();
 
-    // Verify password (supports legacy plain Password field)
-    bool verified = false;
-    if (!string.IsNullOrWhiteSpace(user.PasswordHash)) {
+    var verified = false;
+    if (!string.IsNullOrWhiteSpace(user.PasswordHash))
+    {
         verified = PasswordHelper.VerifyPassword(user.PasswordHash, dto.Password);
-    } else if (!string.IsNullOrEmpty(user.Password)) {
-        // legacy - upgrade
-        if (user.Password == dto.Password) verified = true;
-        if (verified) {
+    }
+    else if (!string.IsNullOrEmpty(user.Password))
+    {
+        verified = user.Password == dto.Password;
+        if (verified)
+        {
             user.PasswordHash = PasswordHelper.HashPassword(dto.Password);
             user.Password = null;
             user.PasswordSetAt = DateTime.UtcNow;
             user.ForcePasswordChange = true;
-            store.Save(dbPath);
+            await db.SaveChangesAsync();
         }
     }
+
     if (!verified) return Results.Unauthorized();
-    // Check password expiry (every 4 months)
-    if (user.PasswordSetAt == null || user.PasswordSetAt <= DateTime.UtcNow.AddMonths(-4)) {
+
+    if (user.PasswordSetAt == null || user.PasswordSetAt <= DateTime.UtcNow.AddMonths(-4))
+    {
         user.ForcePasswordChange = true;
-        store.Save(dbPath);
+        await db.SaveChangesAsync();
     }
 
     var token = Guid.NewGuid().ToString();
     sessions[token] = user.Username;
-    return Results.Ok(new { token, username = user.Username, role = user.Role, email = user.Email, theme = user.Theme, forcePasswordChange = user.ForcePasswordChange });
+
+    return Results.Ok(new
+    {
+        token,
+        username = user.Username,
+        role = user.Role,
+        email = user.Email,
+        theme = user.Theme,
+        forcePasswordChange = user.ForcePasswordChange
+    });
 });
 
-// Forgot password - send temporary password to email
-app.MapPost("/auth/forgot-password", async (ForgotDto dto) =>
+app.MapPost("/auth/forgot-password", async (ForgotDto dto, AppDbContext db) =>
 {
     if (dto == null || string.IsNullOrWhiteSpace(dto.Email)) return Results.BadRequest();
-    var user = store.Users.FirstOrDefault(u => string.Equals(u.Email, dto.Email, StringComparison.OrdinalIgnoreCase));
+
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Email != null && u.Email.ToLower() == dto.Email.ToLower());
     if (user == null) return Results.NotFound();
-    // generate temporary password
+
     var tmp = PasswordHelper.GenerateTemporaryPassword(10);
     user.PasswordHash = PasswordHelper.HashPassword(tmp);
     user.PasswordSetAt = DateTime.UtcNow;
     user.ForcePasswordChange = true;
-    store.Save(dbPath);
+    await db.SaveChangesAsync();
 
     var emailService = new EmailService();
     var sent = await emailService.SendTemporaryPasswordAsync(user.Email ?? "", user.Username, tmp);
@@ -115,68 +110,85 @@ app.MapPost("/auth/forgot-password", async (ForgotDto dto) =>
     return Results.Ok(new { message = "Temporary password sent" });
 });
 
-// Change password (requires auth). If ForcePasswordChange is true, oldPassword can be omitted.
-app.MapPost("/me/change-password", (HttpRequest req, ChangePasswordDto dto) =>
+app.MapPost("/me/change-password", async (HttpRequest req, ChangePasswordDto dto, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null) return Results.Unauthorized();
     if (dto == null || string.IsNullOrWhiteSpace(dto.NewPassword)) return Results.BadRequest();
-    if (!user.ForcePasswordChange) {
+
+    if (!user.ForcePasswordChange)
+    {
         if (string.IsNullOrWhiteSpace(dto.OldPassword)) return Results.BadRequest();
-        // verify old
-        bool ok = false;
+
+        var ok = false;
         if (!string.IsNullOrWhiteSpace(user.PasswordHash)) ok = PasswordHelper.VerifyPassword(user.PasswordHash, dto.OldPassword);
         else if (!string.IsNullOrEmpty(user.Password)) ok = user.Password == dto.OldPassword;
         if (!ok) return Results.Forbid();
     }
+
     user.PasswordHash = PasswordHelper.HashPassword(dto.NewPassword);
     user.PasswordSetAt = DateTime.UtcNow;
     user.ForcePasswordChange = false;
     user.Password = null;
-    store.Save(dbPath);
+    await db.SaveChangesAsync();
+
     return Results.Ok(new { message = "Password changed" });
 });
 
-app.MapGet("/me", (HttpRequest req) =>
+app.MapGet("/me", async (HttpRequest req, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null) return Results.Unauthorized();
     return Results.Ok(new { username = user.Username, role = user.Role, email = user.Email, theme = user.Theme });
 });
 
-app.MapPost("/me/theme", (HttpRequest req, ThemeDto dto) =>
+app.MapPost("/me/theme", async (HttpRequest req, ThemeDto dto, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null) return Results.Unauthorized();
     if (dto == null || string.IsNullOrWhiteSpace(dto.Theme)) return Results.BadRequest();
+
     user.Theme = dto.Theme;
-    store.Save(dbPath);
+    await db.SaveChangesAsync();
     return Results.Ok(new { theme = user.Theme });
 });
 
-app.MapGet("/requests", (HttpRequest req) =>
+app.MapGet("/requests", async (HttpRequest req, AppDbContext db) =>
 {
-    // admin only: return all requests
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null || user.Role != "Admin") return Results.Unauthorized();
-    return Results.Ok(store.Requests.OrderBy(r => r.Date));
-});
 
-// Users management (admin)
-app.MapGet("/users", (HttpRequest req) =>
-{
-    var user = GetUserFromRequest(req);
-    if (user == null || user.Role != "Admin") return Results.Unauthorized();
-    var list = store.Users.Select(u => new { username = u.Username, displayName = u.DisplayName, email = u.Email, role = u.Role });
+    var list = await db.Requests.OrderBy(r => r.Date).ToListAsync();
     return Results.Ok(list);
 });
 
-app.MapPost("/users", async (HttpRequest req, CreateUserDto dto) =>
+app.MapGet("/users", async (HttpRequest req, AppDbContext db) =>
 {
-    var admin = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
+    if (user == null || user.Role != "Admin") return Results.Unauthorized();
+
+    var list = await db.Users
+        .OrderBy(u => u.Username)
+        .Select(u => new { username = u.Username, displayName = u.DisplayName, email = u.Email, role = u.Role })
+        .ToListAsync();
+
+    return Results.Ok(list);
+});
+
+app.MapPost("/users", async (HttpRequest req, CreateUserDto dto, AppDbContext db) =>
+{
+    var admin = await GetUserFromRequest(req, db);
     if (admin == null || admin.Role != "Admin") return Results.Unauthorized();
-    if (dto == null || string.IsNullOrWhiteSpace(dto.Username) || string.IsNullOrWhiteSpace(dto.Email)) return Results.BadRequest(new { error = "Username and email are required" });
-    if (store.Users.Any(u => u.Username == dto.Username)) return Results.Conflict(new { error = "Username already exists" });
+
+    if (dto == null || string.IsNullOrWhiteSpace(dto.Username) || string.IsNullOrWhiteSpace(dto.Email))
+    {
+        return Results.BadRequest(new { error = "Username and email are required" });
+    }
+
+    if (await db.Users.AnyAsync(u => u.Username == dto.Username))
+    {
+        return Results.Conflict(new { error = "Username already exists" });
+    }
 
     var tmp = PasswordHelper.GenerateTemporaryPassword(10);
     var user = new User
@@ -187,10 +199,12 @@ app.MapPost("/users", async (HttpRequest req, CreateUserDto dto) =>
         Role = string.IsNullOrWhiteSpace(dto.Role) ? "Employee" : dto.Role,
         PasswordHash = PasswordHelper.HashPassword(tmp),
         PasswordSetAt = DateTime.UtcNow,
-        ForcePasswordChange = true
+        ForcePasswordChange = true,
+        Theme = "light"
     };
-    store.Users.Add(user);
-    store.Save(dbPath);
+
+    db.Users.Add(user);
+    await db.SaveChangesAsync();
 
     _ = Task.Run(async () =>
     {
@@ -199,46 +213,62 @@ app.MapPost("/users", async (HttpRequest req, CreateUserDto dto) =>
             var emailService = new EmailService();
             await emailService.SendTemporaryPasswordAsync(user.Email ?? "", user.Username, tmp);
         }
-        catch { }
+        catch
+        {
+        }
     });
 
     return Results.Created($"/users/{user.Username}", new { username = user.Username, displayName = user.DisplayName, email = user.Email, role = user.Role });
 });
 
-// Delete user (admin only)
-app.MapDelete("/users/{username}", (HttpRequest req, string username) =>
+app.MapDelete("/users/{username}", async (HttpRequest req, string username, AppDbContext db) =>
 {
-    var admin = GetUserFromRequest(req);
+    var admin = await GetUserFromRequest(req, db);
     if (admin == null || admin.Role != "Admin") return Results.Unauthorized();
-    var u = store.Users.FirstOrDefault(x => x.Username == username);
-    if (u == null) return Results.NotFound();
-    // Prevent deleting yourself
-    if (u.Username == admin.Username) return Results.BadRequest(new { error = "Cannot delete yourself" });
-    // Prevent deleting the last admin
-    if (u.Role == "Admin" && store.Users.Count(x => x.Role == "Admin") <= 1)
+
+    var target = await db.Users.FirstOrDefaultAsync(u => u.Username == username);
+    if (target == null) return Results.NotFound();
+
+    if (target.Username == admin.Username)
     {
-        return Results.BadRequest(new { error = "Cannot delete the last admin" });
+        return Results.BadRequest(new { error = "Cannot delete yourself" });
     }
-    store.Users.Remove(u);
-    store.Save(dbPath);
-    return Results.Ok(new { message = "Deleted", username = username });
+
+    if (target.Role == "Admin")
+    {
+        var adminsCount = await db.Users.CountAsync(u => u.Role == "Admin");
+        if (adminsCount <= 1)
+        {
+            return Results.BadRequest(new { error = "Cannot delete the last admin" });
+        }
+    }
+
+    db.Users.Remove(target);
+    await db.SaveChangesAsync();
+    return Results.Ok(new { message = "Deleted", username });
 });
 
-app.MapGet("/requests/mine", (HttpRequest req) =>
+app.MapGet("/requests/mine", async (HttpRequest req, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null) return Results.Unauthorized();
-    var mine = store.Requests.Where(r => r.EmployeeUsername == user.Username).OrderBy(r => r.Date);
+
+    var mine = await db.Requests
+        .Where(r => r.EmployeeUsername == user.Username)
+        .OrderBy(r => r.Date)
+        .ToListAsync();
+
     return Results.Ok(mine);
 });
 
-app.MapPost("/requests", async (HttpRequest req, CreateRequestDto dto) =>
+app.MapPost("/requests", async (HttpRequest req, CreateRequestDto dto, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null) return Results.Unauthorized();
     if (dto == null) return Results.BadRequest();
-    var id = Interlocked.Increment(ref store.NextId);
-    var r = new Request
+
+    var id = await GetNextIdAsync(db);
+    var request = new Request
     {
         Id = id,
         EmployeeUsername = user.Username,
@@ -246,127 +276,129 @@ app.MapPost("/requests", async (HttpRequest req, CreateRequestDto dto) =>
         Date = dto.Date.Date,
         Status = "Pending"
     };
-    store.Requests.Add(r);
-    store.Save(dbPath);
 
-    // Send email to admin
+    db.Requests.Add(request);
+    await db.SaveChangesAsync();
+
     _ = Task.Run(async () =>
     {
         var emailService = new EmailService();
-        await emailService.SendRequestNotificationAsync(
-            "paolo.bini@fos.it",
-            r.EmployeeName,
-            r.Date.ToString("yyyy-MM-dd")
-        );
+        await emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, request.Date.ToString("yyyy-MM-dd"));
     });
 
-    return Results.Created($"/requests/{id}", r);
+    return Results.Created($"/requests/{request.Id}", request);
 });
 
-app.MapPost("/requests/{id}/approve", (HttpRequest req, int id) =>
+app.MapPost("/requests/{id}/approve", async (HttpRequest req, int id, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null || user.Role != "Admin") return Results.Unauthorized();
-    var r = store.Requests.FirstOrDefault(x => x.Id == id);
-    if (r == null) return Results.NotFound();
-    r.Status = "Approved";
-    r.DecisionBy = user.Username;
-    r.DecisionAt = DateTime.UtcNow;
-    store.Save(dbPath);
 
-    // Send email to employee notifying approval
+    var request = await db.Requests.FirstOrDefaultAsync(x => x.Id == id);
+    if (request == null) return Results.NotFound();
+
+    request.Status = "Approved";
+    request.DecisionBy = user.Username;
+    request.DecisionAt = DateTime.UtcNow;
+    await db.SaveChangesAsync();
+
     _ = Task.Run(async () =>
     {
         try
         {
-            var employee = store.Users.FirstOrDefault(u => u.Username == r.EmployeeUsername);
+            await using var scopeDb = CreateDbContext(connectionString);
+            var employee = await scopeDb.Users.FirstOrDefaultAsync(u => u.Username == request.EmployeeUsername);
             if (employee != null)
             {
                 var emailService = new EmailService();
-                await emailService.SendDecisionNotificationAsync(
-                    employee.Email ?? "paolo.bini@fos.it",
-                    r.EmployeeName,
-                    r.Date.ToString("yyyy-MM-dd"),
-                    true,
-                    user.Username
-                );
+                await emailService.SendDecisionNotificationAsync(employee.Email ?? "paolo.bini@fos.it", request.EmployeeName, request.Date.ToString("yyyy-MM-dd"), true, user.Username);
             }
         }
-        catch { }
+        catch
+        {
+        }
     });
-    return Results.Ok(r);
+
+    return Results.Ok(request);
 });
 
-app.MapPost("/requests/{id}/reject", (HttpRequest req, int id) =>
+app.MapPost("/requests/{id}/reject", async (HttpRequest req, int id, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null || user.Role != "Admin") return Results.Unauthorized();
-    var r = store.Requests.FirstOrDefault(x => x.Id == id);
-    if (r == null) return Results.NotFound();
-    r.Status = "Rejected";
-    r.DecisionBy = user.Username;
-    r.DecisionAt = DateTime.UtcNow;
-    store.Save(dbPath);
 
-    // Send email to employee notifying rejection
+    var request = await db.Requests.FirstOrDefaultAsync(x => x.Id == id);
+    if (request == null) return Results.NotFound();
+
+    request.Status = "Rejected";
+    request.DecisionBy = user.Username;
+    request.DecisionAt = DateTime.UtcNow;
+    await db.SaveChangesAsync();
+
     _ = Task.Run(async () =>
     {
         try
         {
-            var employee = store.Users.FirstOrDefault(u => u.Username == r.EmployeeUsername);
+            await using var scopeDb = CreateDbContext(connectionString);
+            var employee = await scopeDb.Users.FirstOrDefaultAsync(u => u.Username == request.EmployeeUsername);
             if (employee != null)
             {
                 var emailService = new EmailService();
-                await emailService.SendDecisionNotificationAsync(
-                    employee.Email ?? "paolo.bini@fos.it",
-                    r.EmployeeName,
-                    r.Date.ToString("yyyy-MM-dd"),
-                    false,
-                    user.Username
-                );
+                await emailService.SendDecisionNotificationAsync(employee.Email ?? "paolo.bini@fos.it", request.EmployeeName, request.Date.ToString("yyyy-MM-dd"), false, user.Username);
             }
         }
-        catch { }
+        catch
+        {
+        }
     });
-    return Results.Ok(r);
+
+    return Results.Ok(request);
 });
 
-// Delete a single request (owner or admin)
-app.MapDelete("/requests/{id}", (HttpRequest req, int id) =>
+app.MapDelete("/requests/{id}", async (HttpRequest req, int id, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null) return Results.Unauthorized();
-    var r = store.Requests.FirstOrDefault(x => x.Id == id);
-    if (r == null) return Results.NotFound();
-    if (r.EmployeeUsername != user.Username && user.Role != "Admin") return Results.Forbid();
-    store.Requests.Remove(r);
-    store.Save(dbPath);
+
+    var request = await db.Requests.FirstOrDefaultAsync(x => x.Id == id);
+    if (request == null) return Results.NotFound();
+    if (request.EmployeeUsername != user.Username && user.Role != "Admin") return Results.Forbid();
+
+    db.Requests.Remove(request);
+    await db.SaveChangesAsync();
     return Results.Ok(new { message = "Deleted" });
 });
 
-app.MapGet("/recurring-requests", (HttpRequest req) =>
+app.MapGet("/recurring-requests", async (HttpRequest req, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null || user.Role != "Admin") return Results.Unauthorized();
-    return Results.Ok(store.RecurringRequests.OrderBy(r => r.DayOfWeek));
+
+    var list = await db.RecurringRequests.OrderBy(r => r.DayOfWeek).ToListAsync();
+    return Results.Ok(list);
 });
 
-app.MapGet("/recurring-requests/mine", (HttpRequest req) =>
+app.MapGet("/recurring-requests/mine", async (HttpRequest req, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null) return Results.Unauthorized();
-    var mine = store.RecurringRequests.Where(r => r.EmployeeUsername == user.Username).OrderBy(r => r.DayOfWeek);
+
+    var mine = await db.RecurringRequests
+        .Where(r => r.EmployeeUsername == user.Username)
+        .OrderBy(r => r.DayOfWeek)
+        .ToListAsync();
+
     return Results.Ok(mine);
 });
 
-app.MapPost("/recurring-requests", async (HttpRequest req, CreateRecurringRequestDto dto) =>
+app.MapPost("/recurring-requests", async (HttpRequest req, CreateRecurringRequestDto dto, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null) return Results.Unauthorized();
     if (dto == null || dto.DayOfWeek < 0 || dto.DayOfWeek > 6) return Results.BadRequest();
-    
-    var id = Interlocked.Increment(ref store.NextId);
-    var r = new RecurringRequest
+
+    var id = await GetNextIdAsync(db);
+    var request = new RecurringRequest
     {
         Id = id,
         EmployeeUsername = user.Username,
@@ -375,105 +407,127 @@ app.MapPost("/recurring-requests", async (HttpRequest req, CreateRecurringReques
         DayName = dto.DayName,
         Status = "Pending"
     };
-    store.RecurringRequests.Add(r);
-    store.Save(dbPath);
 
-    // Send email to admin
+    db.RecurringRequests.Add(request);
+    await db.SaveChangesAsync();
+
     _ = Task.Run(async () =>
     {
         var emailService = new EmailService();
-        await emailService.SendRequestNotificationAsync(
-            "paolo.bini@fos.it",
-            r.EmployeeName,
-            $"ogni {r.DayName}"
-        );
+        await emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, $"ogni {request.DayName}");
     });
 
-    return Results.Created($"/recurring-requests/{id}", r);
+    return Results.Created($"/recurring-requests/{request.Id}", request);
 });
 
-app.MapPost("/recurring-requests/{id}/approve", (HttpRequest req, int id) =>
+app.MapPost("/recurring-requests/{id}/approve", async (HttpRequest req, int id, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null || user.Role != "Admin") return Results.Unauthorized();
-    var r = store.RecurringRequests.FirstOrDefault(x => x.Id == id);
-    if (r == null) return Results.NotFound();
-    r.Status = "Approved";
-    r.DecisionBy = user.Username;
-    r.DecisionAt = DateTime.UtcNow;
-    store.Save(dbPath);
 
-    // Send email to employee
+    var request = await db.RecurringRequests.FirstOrDefaultAsync(x => x.Id == id);
+    if (request == null) return Results.NotFound();
+
+    request.Status = "Approved";
+    request.DecisionBy = user.Username;
+    request.DecisionAt = DateTime.UtcNow;
+    await db.SaveChangesAsync();
+
     _ = Task.Run(async () =>
     {
         try
         {
-            var employee = store.Users.FirstOrDefault(u => u.Username == r.EmployeeUsername);
+            await using var scopeDb = CreateDbContext(connectionString);
+            var employee = await scopeDb.Users.FirstOrDefaultAsync(u => u.Username == request.EmployeeUsername);
             if (employee != null)
             {
                 var emailService = new EmailService();
-                await emailService.SendDecisionNotificationAsync(
-                    employee.Email ?? "paolo.bini@fos.it",
-                    r.EmployeeName,
-                    $"ogni {r.DayName}",
-                    true,
-                    user.Username
-                );
+                await emailService.SendDecisionNotificationAsync(employee.Email ?? "paolo.bini@fos.it", request.EmployeeName, $"ogni {request.DayName}", true, user.Username);
             }
         }
-        catch { }
+        catch
+        {
+        }
     });
-    return Results.Ok(r);
+
+    return Results.Ok(request);
 });
 
-app.MapPost("/recurring-requests/{id}/reject", (HttpRequest req, int id) =>
+app.MapPost("/recurring-requests/{id}/reject", async (HttpRequest req, int id, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null || user.Role != "Admin") return Results.Unauthorized();
-    var r = store.RecurringRequests.FirstOrDefault(x => x.Id == id);
-    if (r == null) return Results.NotFound();
-    r.Status = "Rejected";
-    r.DecisionBy = user.Username;
-    r.DecisionAt = DateTime.UtcNow;
-    store.Save(dbPath);
 
-    // Send email to employee
+    var request = await db.RecurringRequests.FirstOrDefaultAsync(x => x.Id == id);
+    if (request == null) return Results.NotFound();
+
+    request.Status = "Rejected";
+    request.DecisionBy = user.Username;
+    request.DecisionAt = DateTime.UtcNow;
+    await db.SaveChangesAsync();
+
     _ = Task.Run(async () =>
     {
         try
         {
-            var employee = store.Users.FirstOrDefault(u => u.Username == r.EmployeeUsername);
+            await using var scopeDb = CreateDbContext(connectionString);
+            var employee = await scopeDb.Users.FirstOrDefaultAsync(u => u.Username == request.EmployeeUsername);
             if (employee != null)
             {
                 var emailService = new EmailService();
-                await emailService.SendDecisionNotificationAsync(
-                    employee.Email ?? "paolo.bini@fos.it",
-                    r.EmployeeName,
-                    $"ogni {r.DayName}",
-                    false,
-                    user.Username
-                );
+                await emailService.SendDecisionNotificationAsync(employee.Email ?? "paolo.bini@fos.it", request.EmployeeName, $"ogni {request.DayName}", false, user.Username);
             }
         }
-        catch { }
+        catch
+        {
+        }
     });
-    return Results.Ok(r);
+
+    return Results.Ok(request);
 });
 
-// Delete a recurring request (owner or admin)
-app.MapDelete("/recurring-requests/{id}", (HttpRequest req, int id) =>
+app.MapDelete("/recurring-requests/{id}", async (HttpRequest req, int id, AppDbContext db) =>
 {
-    var user = GetUserFromRequest(req);
+    var user = await GetUserFromRequest(req, db);
     if (user == null) return Results.Unauthorized();
-    var r = store.RecurringRequests.FirstOrDefault(x => x.Id == id);
-    if (r == null) return Results.NotFound();
-    if (r.EmployeeUsername != user.Username && user.Role != "Admin") return Results.Forbid();
-    store.RecurringRequests.Remove(r);
-    store.Save(dbPath);
+
+    var request = await db.RecurringRequests.FirstOrDefaultAsync(x => x.Id == id);
+    if (request == null) return Results.NotFound();
+    if (request.EmployeeUsername != user.Username && user.Role != "Admin") return Results.Forbid();
+
+    db.RecurringRequests.Remove(request);
+    await db.SaveChangesAsync();
     return Results.Ok(new { message = "Deleted" });
 });
 
 app.Run();
+
+async Task<User?> GetUserFromRequest(HttpRequest req, AppDbContext db)
+{
+    if (!req.Headers.TryGetValue("Authorization", out var val)) return null;
+    var s = val.ToString();
+    if (!s.StartsWith("Bearer ")) return null;
+
+    var token = s.Substring("Bearer ".Length).Trim();
+    if (!sessions.TryGetValue(token, out var username)) return null;
+
+    return await db.Users.FirstOrDefaultAsync(u => u.Username == username);
+}
+
+static async Task<int> GetNextIdAsync(AppDbContext db)
+{
+    var maxRequestId = await db.Requests.Select(x => (int?)x.Id).MaxAsync() ?? 0;
+    var maxRecurringId = await db.RecurringRequests.Select(x => (int?)x.Id).MaxAsync() ?? 0;
+    return Math.Max(maxRequestId, maxRecurringId) + 1;
+}
+
+static AppDbContext CreateDbContext(string connectionString)
+{
+    var options = new DbContextOptionsBuilder<AppDbContext>()
+        .UseNpgsql(connectionString)
+        .Options;
+    return new AppDbContext(options);
+}
 
 static string NormalizeDatabaseUrl(string databaseUrl)
 {
@@ -550,449 +604,5 @@ static void TryOpenDbConnection(string connectionString)
             Console.WriteLine($"[DB startup-check ERROR] socket={sock.SocketErrorCode}");
         }
         throw;
-    }
-}
-
-User? GetUserFromRequest(HttpRequest req)
-{
-    if (!req.Headers.TryGetValue("Authorization", out var val)) return null;
-    var s = val.ToString();
-    if (!s.StartsWith("Bearer ")) return null;
-    var token = s.Substring("Bearer ".Length).Trim();
-    if (!sessions.TryGetValue(token, out var username)) return null;
-    return store.Users.FirstOrDefault(u => u.Username == username);
-}
-
-public class Request
-{
-    public int Id { get; set; }
-    public string EmployeeUsername { get; set; } = "";
-    public string EmployeeName { get; set; } = "";
-    public DateTime Date { get; set; }
-    public string Status { get; set; } = "";
-    public string? DecisionBy { get; set; }
-    public DateTime? DecisionAt { get; set; }
-}
-
-public class CreateRequestDto
-{
-    public DateTime Date { get; set; }
-}
-
-public class User
-{
-    public string Username { get; set; } = "";
-    // legacy plain password (will be upgraded on first login)
-    public string? Password { get; set; }
-    public string? PasswordHash { get; set; }
-    public DateTime? PasswordSetAt { get; set; }
-    public bool ForcePasswordChange { get; set; } = true;
-    public string Role { get; set; } = "Employee"; // or Admin
-    public string? DisplayName { get; set; }
-    public string? Email { get; set; }
-    public string Theme { get; set; } = "light";
-}
-
-public class DataStore
-{
-    public List<User> Users { get; set; } = new List<User>();
-    public List<Request> Requests { get; set; } = new List<Request>();
-    public List<RecurringRequest> RecurringRequests { get; set; } = new List<RecurringRequest>();
-    public int NextId = 0;
-        // Database-backed store (PostgreSQL). `dbPath` is a connection string.
-    public void Save(string dbPath)
-    {
-        try
-        {
-                        using var conn = new NpgsqlConnection(dbPath);
-            conn.Open();
-            using var tx = conn.BeginTransaction();
-
-            var cmd = conn.CreateCommand();
-            cmd.Transaction = tx;
-
-                        cmd.CommandText = "DELETE FROM users; DELETE FROM requests; DELETE FROM recurringrequests;";
-            cmd.ExecuteNonQuery();
-
-            foreach (var u in Users)
-            {
-                                cmd.CommandText = "INSERT INTO users (username, password, passwordhash, passwordsetat, forcepasswordchange, role, displayname, email, theme) VALUES (@u, @p, @ph, @ps, @f, @r, @d, @e, @t);";
-                cmd.Parameters.Clear();
-                                cmd.Parameters.AddWithValue("@u", u.Username);
-                                cmd.Parameters.AddWithValue("@p", u.Password ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@ph", u.PasswordHash ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@ps", u.PasswordSetAt ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@f", u.ForcePasswordChange);
-                                cmd.Parameters.AddWithValue("@r", u.Role ?? "Employee");
-                                cmd.Parameters.AddWithValue("@d", u.DisplayName ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@e", u.Email ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@t", u.Theme ?? (object)DBNull.Value);
-                cmd.ExecuteNonQuery();
-            }
-
-            foreach (var r in Requests)
-            {
-                                cmd.CommandText = "INSERT INTO requests (id, employeeusername, employeename, date, status, decisionby, decisionat) VALUES (@id, @u, @n, @d, @s, @db, @da);";
-                cmd.Parameters.Clear();
-                                cmd.Parameters.AddWithValue("@id", r.Id);
-                                cmd.Parameters.AddWithValue("@u", r.EmployeeUsername);
-                                cmd.Parameters.AddWithValue("@n", r.EmployeeName ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@d", r.Date);
-                                cmd.Parameters.AddWithValue("@s", r.Status ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@db", r.DecisionBy ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@da", r.DecisionAt ?? (object)DBNull.Value);
-                cmd.ExecuteNonQuery();
-            }
-
-            foreach (var rr in RecurringRequests)
-            {
-                                cmd.CommandText = "INSERT INTO recurringrequests (id, employeeusername, employeename, dayofweek, dayname, status, decisionby, decisionat) VALUES (@id, @u, @n, @dw, @dn, @s, @db, @da);";
-                cmd.Parameters.Clear();
-                                cmd.Parameters.AddWithValue("@id", rr.Id);
-                                cmd.Parameters.AddWithValue("@u", rr.EmployeeUsername);
-                                cmd.Parameters.AddWithValue("@n", rr.EmployeeName ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@dw", rr.DayOfWeek);
-                                cmd.Parameters.AddWithValue("@dn", rr.DayName ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@s", rr.Status ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@db", rr.DecisionBy ?? (object)DBNull.Value);
-                                cmd.Parameters.AddWithValue("@da", rr.DecisionAt ?? (object)DBNull.Value);
-                cmd.ExecuteNonQuery();
-            }
-
-            tx.Commit();
-        }
-        catch (PostgresException ex)
-        {
-            LogDbException("SAVE", dbPath, ex);
-        }
-        catch (NpgsqlException ex)
-        {
-            LogDbException("SAVE", dbPath, ex);
-        }
-        catch (Exception ex)
-        {
-            LogDbException("SAVE", dbPath, ex);
-        }
-    }
-
-    public static DataStore LoadOrCreate(string dbPath)
-    {
-        var ds = new DataStore();
-        try
-        {
-                        using var conn = new NpgsqlConnection(dbPath);
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-
-                        cmd.CommandText = "SELECT username, password, passwordhash, passwordsetat, forcepasswordchange, role, displayname, email, theme FROM users";
-            using (var rdr = cmd.ExecuteReader())
-            {
-                while (rdr.Read())
-                {
-                    var u = new User
-                    {
-                        Username = rdr.GetString(0),
-                        Password = rdr.IsDBNull(1) ? null : rdr.GetString(1),
-                        PasswordHash = rdr.IsDBNull(2) ? null : rdr.GetString(2),
-                                                PasswordSetAt = rdr.IsDBNull(3) ? null : rdr.GetFieldValue<DateTime>(3),
-                                                ForcePasswordChange = !rdr.IsDBNull(4) && rdr.GetBoolean(4),
-                        Role = rdr.IsDBNull(5) ? "Employee" : rdr.GetString(5),
-                        DisplayName = rdr.IsDBNull(6) ? null : rdr.GetString(6),
-                        Email = rdr.IsDBNull(7) ? null : rdr.GetString(7),
-                        Theme = rdr.IsDBNull(8) ? "light" : rdr.GetString(8)
-                    };
-                    ds.Users.Add(u);
-                }
-            }
-
-            cmd.CommandText = "SELECT id, employeeusername, employeename, date, status, decisionby, decisionat FROM requests";
-            using (var rdr2 = cmd.ExecuteReader())
-            {
-                while (rdr2.Read())
-                {
-                    var r = new Request
-                    {
-                        Id = rdr2.GetInt32(0),
-                        EmployeeUsername = rdr2.IsDBNull(1) ? "" : rdr2.GetString(1),
-                        EmployeeName = rdr2.IsDBNull(2) ? null : rdr2.GetString(2),
-                        Date = rdr2.GetFieldValue<DateTime>(3),
-                        Status = rdr2.IsDBNull(4) ? null : rdr2.GetString(4),
-                        DecisionBy = rdr2.IsDBNull(5) ? null : rdr2.GetString(5),
-                        DecisionAt = rdr2.IsDBNull(6) ? null : rdr2.GetFieldValue<DateTime>(6)
-                    };
-                    ds.Requests.Add(r);
-                }
-            }
-
-            cmd.CommandText = "SELECT id, employeeusername, employeename, dayofweek, dayname, status, decisionby, decisionat FROM recurringrequests";
-            using (var rdr3 = cmd.ExecuteReader())
-            {
-                while (rdr3.Read())
-                {
-                    var rr = new RecurringRequest
-                    {
-                        Id = rdr3.GetInt32(0),
-                        EmployeeUsername = rdr3.IsDBNull(1) ? "" : rdr3.GetString(1),
-                        EmployeeName = rdr3.IsDBNull(2) ? null : rdr3.GetString(2),
-                        DayOfWeek = rdr3.IsDBNull(3) ? 0 : rdr3.GetInt32(3),
-                        DayName = rdr3.IsDBNull(4) ? null : rdr3.GetString(4),
-                        Status = rdr3.IsDBNull(5) ? null : rdr3.GetString(5),
-                        DecisionBy = rdr3.IsDBNull(6) ? null : rdr3.GetString(6),
-                        DecisionAt = rdr3.IsDBNull(7) ? null : rdr3.GetFieldValue<DateTime>(7)
-                    };
-                    ds.RecurringRequests.Add(rr);
-                }
-            }
-
-            // Compute NextId
-            ds.NextId = ds.Requests.Any() ? ds.Requests.Max(r => r.Id) : 0;
-        }
-        catch (PostgresException ex)
-        {
-            LogDbException("LOAD", dbPath, ex);
-        }
-        catch (NpgsqlException ex)
-        {
-            LogDbException("LOAD", dbPath, ex);
-        }
-        catch (Exception ex)
-        {
-            LogDbException("LOAD", dbPath, ex);
-        }
-
-        return ds;
-    }
-
-    private static void LogDbException(string phase, string connectionString, Exception ex)
-    {
-        try
-        {
-            var csb = new NpgsqlConnectionStringBuilder(connectionString);
-            Console.WriteLine($"[DB {phase} ERROR] host={csb.Host};port={csb.Port};db={csb.Database};user={csb.Username};ssl={csb.SslMode};timeout={csb.Timeout}s");
-        }
-        catch
-        {
-            Console.WriteLine($"[DB {phase} ERROR] unable to parse connection string");
-        }
-
-        Console.WriteLine($"[DB {phase} ERROR] {ex.GetType().Name}: {ex.Message}");
-
-        if (ex is PostgresException pg)
-        {
-            Console.WriteLine($"[DB {phase} ERROR] sqlstate={pg.SqlState}; severity={pg.Severity}; detail={pg.Detail}; hint={pg.Hint}; where={pg.Where}; schema={pg.SchemaName}; table={pg.TableName}; column={pg.ColumnName}");
-        }
-
-        if (ex is NpgsqlException npg && npg.InnerException != null)
-        {
-            Console.WriteLine($"[DB {phase} ERROR] inner={npg.InnerException.GetType().Name}: {npg.InnerException.Message}");
-        }
-
-        if (ex.InnerException is SocketException sock)
-        {
-            Console.WriteLine($"[DB {phase} ERROR] socket={sock.SocketErrorCode}");
-        }
-
-        Console.WriteLine($"[DB {phase} ERROR] stack={ex.StackTrace}");
-    }
-}
-
-public class LoginDto
-{
-    public string Username { get; set; } = "";
-    public string Password { get; set; } = "";
-}
-
-public class ThemeDto
-{
-    public string Theme { get; set; } = "light";
-}
-
-public class RecurringRequest
-{
-    public int Id { get; set; }
-    public string EmployeeUsername { get; set; } = "";
-    public string EmployeeName { get; set; } = "";
-    public int DayOfWeek { get; set; } // 0=Sunday, 1=Monday, ..., 6=Saturday
-    public string DayName { get; set; } = "";
-    public string Status { get; set; } = "Pending"; // Pending, Approved, Rejected
-    public string? DecisionBy { get; set; }
-    public DateTime? DecisionAt { get; set; }
-}
-
-public class CreateRecurringRequestDto
-{
-    public int DayOfWeek { get; set; }
-    public string DayName { get; set; } = "";
-}
-
-public class ForgotDto { public string Email { get; set; } = ""; }
-
-public class ChangePasswordDto { public string? OldPassword { get; set; } public string NewPassword { get; set; } = ""; }
-
-public class CreateUserDto { public string Username { get; set; } = ""; public string? DisplayName { get; set; } public string Email { get; set; } = ""; public string? Role { get; set; } }
-
-public static class PasswordHelper
-{
-    public static string HashPassword(string password)
-    {
-        using var rng = RandomNumberGenerator.Create();
-        var salt = new byte[16];
-        rng.GetBytes(salt);
-        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, 10000, HashAlgorithmName.SHA256);
-        var hash = pbkdf2.GetBytes(32);
-        var combined = new byte[salt.Length + hash.Length];
-        Buffer.BlockCopy(salt, 0, combined, 0, salt.Length);
-        Buffer.BlockCopy(hash, 0, combined, salt.Length, hash.Length);
-        return Convert.ToBase64String(combined);
-    }
-
-    public static bool VerifyPassword(string storedBase64, string password)
-    {
-        try {
-            var combined = Convert.FromBase64String(storedBase64);
-            var salt = new byte[16];
-            Buffer.BlockCopy(combined, 0, salt, 0, salt.Length);
-            var hash = new byte[32];
-            Buffer.BlockCopy(combined, salt.Length, hash, 0, hash.Length);
-            using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, 10000, HashAlgorithmName.SHA256);
-            var testHash = pbkdf2.GetBytes(32);
-            Console.WriteLine($"[PASSWORD VERIFY] storedHash={Convert.ToBase64String(hash)}; computedHash={Convert.ToBase64String(testHash)}");
-            return testHash.SequenceEqual(hash);
-        } catch { return false; }
-    }
-
-    public static string GenerateTemporaryPassword(int len = 10)
-    {
-        const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-        var sb = new StringBuilder(len);
-        using var rng = RandomNumberGenerator.Create();
-        var buf = new byte[4];
-        for (int i = 0; i < len; i++) {
-            rng.GetBytes(buf);
-            var v = BitConverter.ToUInt32(buf, 0);
-            sb.Append(chars[(int)(v % (uint)chars.Length)]);
-        }
-        return sb.ToString();
-    }
-}
-
-public class EmailService
-{
-    public async Task SendRequestNotificationAsync(string toEmail, string employeeName, string dateString)
-    {
-        try
-        {
-            var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
-            var smtpPassword = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
-            var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SmartWork", smtpUsername));
-            message.To.Add(new MailboxAddress("Admin", toEmail));
-            message.Subject = "Nuova Richiesta di Smart Working";
-
-            var bodyBuilder = new BodyBuilder();
-            bodyBuilder.TextBody = $@"Una nuova richiesta di smart working è stata creata.
-
-Dipendente: {employeeName}
-Data: {dateString}
-
-Accedi al sistema per revisione e approvazione.";
-            message.Body = bodyBuilder.ToMessageBody();
-
-            using (var client = new SmtpClient())
-            {
-                var host = "smtp.gmail.com";
-                var port = 587;
-
-                await client.ConnectAsync(host, port, SecureSocketOptions.StartTls);
-                await client.AuthenticateAsync(smtpUsername, smtpPassword);
-                await client.SendAsync(message);
-                await client.DisconnectAsync(true);
-
-                Console.WriteLine($"[EMAIL] Notification sent to {toEmail}");
-            }
-        }
-        catch (Exception ex)
-        {
-            // Log but don't throw - we don't want email errors to break request submission
-            Console.WriteLine($"[EMAIL ERROR] Failed to send notification: {ex.Message}");
-        }
-    }
-
-    public async Task SendDecisionNotificationAsync(string toEmail, string employeeName, string dateString, bool approved, string decidedBy)
-    {
-        try
-        {
-            var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
-            var smtpPassword = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
-            var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SmartWork", smtpUsername));
-            message.To.Add(new MailboxAddress(employeeName, toEmail));
-            message.Subject = approved ? "Richiesta approvata" : "Richiesta rifiutata";
-
-            var bodyBuilder = new BodyBuilder();
-            bodyBuilder.TextBody = approved
-                ? $"La tua richiesta di smart working per il {dateString} è stata approvata da {decidedBy}."
-                : $"La tua richiesta di smart working per il {dateString} è stata rifiutata da {decidedBy}.";
-            message.Body = bodyBuilder.ToMessageBody();
-
-            using (var client = new SmtpClient())
-            {
-                var host = "smtp.gmail.com";
-                var port = 587;
-
-                await client.ConnectAsync(host, port, SecureSocketOptions.StartTls);
-                await client.AuthenticateAsync(smtpUsername, smtpPassword);
-                await client.SendAsync(message);
-                await client.DisconnectAsync(true);
-
-                Console.WriteLine($"[EMAIL] Decision notification sent to {toEmail}");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[EMAIL ERROR] Failed to send decision notification: {ex.Message}");
-        }
-    }
-
-    public async Task<bool> SendTemporaryPasswordAsync(string toEmail, string username, string tempPassword)
-    {
-        try
-        {
-            var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME") ?? throw new InvalidOperationException("SMTP_USERNAME environment variable is required");
-            var smtpPassword = Environment.GetEnvironmentVariable("SMTP_PASSWORD") ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
-            var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SmartWork", smtpUsername));
-            message.To.Add(new MailboxAddress(username, toEmail));
-            message.Subject = "Password temporanea SmartWork";
-
-            var bodyBuilder = new BodyBuilder();
-            bodyBuilder.TextBody = $@"Hai richiesto il ripristino password.
-
-Nome utente: {username}
-Password temporanea: {tempPassword}
-
-Effettua l'accesso e cambia la password al più presto.";
-            message.Body = bodyBuilder.ToMessageBody();
-
-            using (var client = new SmtpClient())
-            {
-                var host = "smtp.gmail.com";
-                var port = 587;
-                await client.ConnectAsync(host, port, SecureSocketOptions.StartTls);
-                await client.AuthenticateAsync(smtpUsername, smtpPassword);
-                await client.SendAsync(message);
-                await client.DisconnectAsync(true);
-
-                Console.WriteLine($"[EMAIL] Temporary password sent to {toEmail}");
-                return true;
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[EMAIL ERROR] Failed to send temporary password: {ex.Message}");
-            return false;
-        }
-
-        return false;
     }
 }
