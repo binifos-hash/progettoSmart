@@ -4,10 +4,12 @@ using Microsoft.EntityFrameworkCore;
 public class RecurringRequestDomainService
 {
     private readonly EmailService _emailService;
+    private readonly ILogger<RecurringRequestDomainService> _logger;
 
-    public RecurringRequestDomainService(EmailService emailService)
+    public RecurringRequestDomainService(EmailService emailService, ILogger<RecurringRequestDomainService> logger)
     {
         _emailService = emailService;
+        _logger = logger;
     }
 
     public Task<List<RecurringRequest>> GetAllAsync(AppDbContext db, CancellationToken cancellationToken = default)
@@ -51,7 +53,16 @@ public class RecurringRequestDomainService
 
         _ = Task.Run(async () =>
         {
-            await _emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, $"ogni {request.DayName}");
+            try
+            {
+                _logger.LogInformation("[RECURRING] Sending new recurring request notification. requestId={RequestId} employee={EmployeeName} day={DayName}", request.Id, request.EmployeeName, request.DayName);
+                await _emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, $"ogni {request.DayName}");
+                _logger.LogInformation("[RECURRING] New recurring request notification finished. requestId={RequestId}", request.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[RECURRING] Failed to send new recurring request notification. requestId={RequestId}", request.Id);
+            }
         });
 
         return request;
@@ -79,16 +90,23 @@ public class RecurringRequestDomainService
             {
                 if (!string.IsNullOrWhiteSpace(employeeEmail))
                 {
+                    _logger.LogInformation("[RECURRING] Sending decision notification. requestId={RequestId} approved={Approved} employeeEmail={EmployeeEmail}", request.Id, approved, employeeEmail);
                     await _emailService.SendDecisionNotificationAsync(
                         employeeEmail,
                         request.EmployeeName,
                         $"ogni {request.DayName}",
                         approved,
                         adminUsername);
+                    _logger.LogInformation("[RECURRING] Decision notification finished. requestId={RequestId}", request.Id);
+                }
+                else
+                {
+                    _logger.LogWarning("[RECURRING] Decision notification skipped: missing employee email. requestId={RequestId}", request.Id);
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "[RECURRING] Failed to send decision notification. requestId={RequestId}", request.Id);
             }
         });
 

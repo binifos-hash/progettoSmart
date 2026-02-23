@@ -2,9 +2,17 @@ using MailKit.Net.Smtp;
 using MailKit.Security;
 using MimeKit;
 using System.Globalization;
+using System.Diagnostics;
 
 public class EmailService
 {
+    private readonly ILogger<EmailService> _logger;
+
+    public EmailService(ILogger<EmailService> logger)
+    {
+        _logger = logger;
+    }
+
     private sealed class SmtpSettings
     {
         public string Host { get; init; } = "smtp.gmail.com";
@@ -68,26 +76,131 @@ public class EmailService
         };
     }
 
-    private static async Task SendEmailAsync(MimeMessage message, string username, string password)
+    private static string MaskEmail(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email)) return "(empty)";
+
+        var at = email.IndexOf('@');
+        if (at <= 1 || at == email.Length - 1) return "***";
+
+        var name = email[..at];
+        var domain = email[(at + 1)..];
+        var visibleName = name.Length <= 2 ? name[0].ToString() : $"{name[0]}***{name[^1]}";
+        return $"{visibleName}@{domain}";
+    }
+
+    private void LogSmtpConfiguration(string operationId, SmtpSettings settings, string username)
+    {
+        var hostFromEnv = Environment.GetEnvironmentVariable("SMTP_HOST");
+        var portFromEnv = Environment.GetEnvironmentVariable("SMTP_PORT");
+        var secureFromEnv = Environment.GetEnvironmentVariable("SMTP_SECURE");
+        var timeoutFromEnv = Environment.GetEnvironmentVariable("SMTP_TIMEOUT_MS");
+        var usernameFromEnv = Environment.GetEnvironmentVariable("SMTP_USERNAME");
+        var hasPassword = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SMTP_PASSWORD"));
+
+        _logger.LogInformation(
+            "[EMAIL:{OperationId}] SMTP config resolved. host={Host} port={Port} secure={Secure} timeoutMs={TimeoutMs} smtpUser={SmtpUser}",
+            operationId,
+            settings.Host,
+            settings.Port,
+            settings.SecureSocketOptions,
+            settings.TimeoutMs,
+            MaskEmail(username));
+
+        _logger.LogInformation(
+            "[EMAIL:{OperationId}] SMTP env raw values. SMTP_HOST='{HostRaw}' SMTP_PORT='{PortRaw}' SMTP_SECURE='{SecureRaw}' SMTP_TIMEOUT_MS='{TimeoutRaw}' SMTP_USERNAME='{UserRaw}' SMTP_PASSWORD_SET={HasPassword}",
+            operationId,
+            string.IsNullOrWhiteSpace(hostFromEnv) ? "(null/empty -> default)" : hostFromEnv,
+            string.IsNullOrWhiteSpace(portFromEnv) ? "(null/empty -> default)" : portFromEnv,
+            string.IsNullOrWhiteSpace(secureFromEnv) ? "(null/empty -> default)" : secureFromEnv,
+            string.IsNullOrWhiteSpace(timeoutFromEnv) ? "(null/empty -> default)" : timeoutFromEnv,
+            string.IsNullOrWhiteSpace(usernameFromEnv) ? "(null/empty)" : MaskEmail(usernameFromEnv),
+            hasPassword);
+    }
+
+    private async Task SendEmailAsync(MimeMessage message, string username, string password, string operationId)
     {
         var settings = GetSmtpSettings();
+        LogSmtpConfiguration(operationId, settings, username);
+
+        var totalSw = Stopwatch.StartNew();
 
         using var client = new SmtpClient
         {
             Timeout = settings.TimeoutMs
         };
 
-        await client.ConnectAsync(settings.Host, settings.Port, settings.SecureSocketOptions);
-        await client.AuthenticateAsync(username, password);
-        await client.SendAsync(message);
-        await client.DisconnectAsync(true);
+        _logger.LogInformation(
+            "[EMAIL:{OperationId}] Starting SMTP send. from={From} to={To} subject='{Subject}'",
+            operationId,
+            string.Join(",", message.From.Mailboxes.Select(m => MaskEmail(m.Address))),
+            string.Join(",", message.To.Mailboxes.Select(m => MaskEmail(m.Address))),
+            message.Subject);
+
+        try
+        {
+            var sw = Stopwatch.StartNew();
+            _logger.LogInformation("[EMAIL:{OperationId}] Connecting to SMTP server...", operationId);
+            await client.ConnectAsync(settings.Host, settings.Port, settings.SecureSocketOptions);
+            sw.Stop();
+            _logger.LogInformation(
+                "[EMAIL:{OperationId}] SMTP connect completed in {ElapsedMs}ms. connected={Connected} secure={Secure} authMechanisms={AuthMechanisms}",
+                operationId,
+                sw.ElapsedMilliseconds,
+                client.IsConnected,
+                client.IsSecure,
+                string.Join(",", client.AuthenticationMechanisms));
+
+            sw.Restart();
+            _logger.LogInformation("[EMAIL:{OperationId}] Authenticating as {User}...", operationId, MaskEmail(username));
+            await client.AuthenticateAsync(username, password);
+            sw.Stop();
+            _logger.LogInformation(
+                "[EMAIL:{OperationId}] SMTP auth completed in {ElapsedMs}ms. authenticated={Authenticated}",
+                operationId,
+                sw.ElapsedMilliseconds,
+                client.IsAuthenticated);
+
+            sw.Restart();
+            _logger.LogInformation("[EMAIL:{OperationId}] Sending message data...", operationId);
+            await client.SendAsync(message);
+            sw.Stop();
+            _logger.LogInformation("[EMAIL:{OperationId}] SMTP send completed in {ElapsedMs}ms.", operationId, sw.ElapsedMilliseconds);
+
+            sw.Restart();
+            _logger.LogInformation("[EMAIL:{OperationId}] Disconnecting from SMTP server...", operationId);
+            await client.DisconnectAsync(true);
+            sw.Stop();
+            totalSw.Stop();
+            _logger.LogInformation("[EMAIL:{OperationId}] SMTP disconnect completed in {ElapsedMs}ms. TOTAL={TotalMs}ms.", operationId, sw.ElapsedMilliseconds, totalSw.ElapsedMilliseconds);
+        }
+        catch
+        {
+            totalSw.Stop();
+            _logger.LogError(
+                "[EMAIL:{OperationId}] SMTP send failed after {ElapsedMs}ms. connected={Connected} authenticated={Authenticated}",
+                operationId,
+                totalSw.ElapsedMilliseconds,
+                client.IsConnected,
+                client.IsAuthenticated);
+            throw;
+        }
     }
 
     public async Task SendRequestNotificationAsync(string toEmail, string employeeName, string dateString)
     {
+        var operationId = Guid.NewGuid().ToString("N");
         try
         {
+            _logger.LogInformation(
+                "[EMAIL:{OperationId}] SendRequestNotificationAsync started. to={ToEmail} employee={EmployeeName} date={DateString}",
+                operationId,
+                MaskEmail(toEmail),
+                employeeName,
+                dateString);
+
             var (username, password) = GetCredentials();
+            _logger.LogInformation("[EMAIL:{OperationId}] SMTP credentials loaded successfully for user {SmtpUser}", operationId, MaskEmail(username));
 
             var message = new MimeMessage();
             message.From.Add(new MailboxAddress("SmartWork", username));
@@ -103,19 +216,35 @@ Data: {dateString}
 Accedi al sistema per revisione e approvazione."
             }.ToMessageBody();
 
-            await SendEmailAsync(message, username, password);
+            await SendEmailAsync(message, username, password, operationId);
+            _logger.LogInformation("[EMAIL:{OperationId}] SendRequestNotificationAsync completed successfully.", operationId);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[EMAIL ERROR] Failed to send notification: {ex.Message}; inner={ex.InnerException?.Message}");
+            _logger.LogError(ex,
+                "[EMAIL:{OperationId}] Failed to send request notification. message='{Message}' inner='{Inner}'",
+                operationId,
+                ex.Message,
+                ex.InnerException?.Message ?? "(none)");
         }
     }
 
     public async Task SendDecisionNotificationAsync(string toEmail, string employeeName, string dateString, bool approved, string decidedBy)
     {
+        var operationId = Guid.NewGuid().ToString("N");
         try
         {
+            _logger.LogInformation(
+                "[EMAIL:{OperationId}] SendDecisionNotificationAsync started. to={ToEmail} employee={EmployeeName} date={DateString} approved={Approved} decidedBy={DecidedBy}",
+                operationId,
+                MaskEmail(toEmail),
+                employeeName,
+                dateString,
+                approved,
+                decidedBy);
+
             var (username, password) = GetCredentials();
+            _logger.LogInformation("[EMAIL:{OperationId}] SMTP credentials loaded successfully for user {SmtpUser}", operationId, MaskEmail(username));
 
             var message = new MimeMessage();
             message.From.Add(new MailboxAddress("SmartWork", username));
@@ -128,19 +257,33 @@ Accedi al sistema per revisione e approvazione."
                     : $"La tua richiesta di smart working per il {dateString} è stata rifiutata da {decidedBy}."
             }.ToMessageBody();
 
-            await SendEmailAsync(message, username, password);
+            await SendEmailAsync(message, username, password, operationId);
+            _logger.LogInformation("[EMAIL:{OperationId}] SendDecisionNotificationAsync completed successfully.", operationId);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[EMAIL ERROR] Failed to send decision notification: {ex.Message}; inner={ex.InnerException?.Message}");
+            _logger.LogError(ex,
+                "[EMAIL:{OperationId}] Failed to send decision notification. message='{Message}' inner='{Inner}'",
+                operationId,
+                ex.Message,
+                ex.InnerException?.Message ?? "(none)");
         }
     }
 
     public async Task<bool> SendTemporaryPasswordAsync(string toEmail, string username, string tempPassword)
     {
+        var operationId = Guid.NewGuid().ToString("N");
         try
         {
+            _logger.LogInformation(
+                "[EMAIL:{OperationId}] SendTemporaryPasswordAsync started. to={ToEmail} username={Username} tempPasswordLength={PwdLength}",
+                operationId,
+                MaskEmail(toEmail),
+                username,
+                string.IsNullOrEmpty(tempPassword) ? 0 : tempPassword.Length);
+
             var (smtpUsername, smtpPassword) = GetCredentials();
+            _logger.LogInformation("[EMAIL:{OperationId}] SMTP credentials loaded successfully for user {SmtpUser}", operationId, MaskEmail(smtpUsername));
 
             var message = new MimeMessage();
             message.From.Add(new MailboxAddress("SmartWork", smtpUsername));
@@ -156,13 +299,19 @@ Password temporanea: {tempPassword}
 Effettua l'accesso e cambia la password al più presto."
             }.ToMessageBody();
 
-            await SendEmailAsync(message, smtpUsername, smtpPassword);
+            await SendEmailAsync(message, smtpUsername, smtpPassword, operationId);
+
+            _logger.LogInformation("[EMAIL:{OperationId}] SendTemporaryPasswordAsync completed successfully.", operationId);
 
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[EMAIL ERROR] Failed to send temporary password: {ex.Message}; inner={ex.InnerException?.Message}");
+            _logger.LogError(ex,
+                "[EMAIL:{OperationId}] Failed to send temporary password email. message='{Message}' inner='{Inner}'",
+                operationId,
+                ex.Message,
+                ex.InnerException?.Message ?? "(none)");
             return false;
         }
     }

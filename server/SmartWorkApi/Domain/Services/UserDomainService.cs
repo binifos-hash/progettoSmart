@@ -3,10 +3,12 @@ using Microsoft.EntityFrameworkCore;
 public class UserDomainService
 {
     private readonly EmailService _emailService;
+    private readonly ILogger<UserDomainService> _logger;
 
-    public UserDomainService(EmailService emailService)
+    public UserDomainService(EmailService emailService, ILogger<UserDomainService> logger)
     {
         _emailService = emailService;
+        _logger = logger;
     }
 
     public Task<List<UserListItem>> GetUsersAsync(AppDbContext db, CancellationToken cancellationToken = default)
@@ -57,10 +59,13 @@ public class UserDomainService
         {
             try
             {
+                _logger.LogInformation("[USER] Sending onboarding temporary password email. username={Username} email={Email}", user.Username, user.Email);
                 await _emailService.SendTemporaryPasswordAsync(user.Email ?? "", user.Username, tempPassword);
+                _logger.LogInformation("[USER] Onboarding temporary password email finished. username={Username}", user.Username);
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "[USER] Failed to send onboarding temporary password email. username={Username}", user.Username);
             }
         });
 

@@ -4,10 +4,12 @@ using Microsoft.EntityFrameworkCore;
 public class RequestDomainService
 {
     private readonly EmailService _emailService;
+    private readonly ILogger<RequestDomainService> _logger;
 
-    public RequestDomainService(EmailService emailService)
+    public RequestDomainService(EmailService emailService, ILogger<RequestDomainService> logger)
     {
         _emailService = emailService;
+        _logger = logger;
     }
 
     public Task<List<Request>> GetAllAsync(AppDbContext db, CancellationToken cancellationToken = default)
@@ -51,7 +53,16 @@ public class RequestDomainService
 
         _ = Task.Run(async () =>
         {
-            await _emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, request.Date.ToString("yyyy-MM-dd"));
+            try
+            {
+                _logger.LogInformation("[REQUEST] Sending new request notification. requestId={RequestId} employee={EmployeeName} date={Date}", request.Id, request.EmployeeName, request.Date.ToString("yyyy-MM-dd"));
+                await _emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, request.Date.ToString("yyyy-MM-dd"));
+                _logger.LogInformation("[REQUEST] New request notification finished. requestId={RequestId}", request.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[REQUEST] Failed to send new request notification. requestId={RequestId}", request.Id);
+            }
         });
 
         return request;
@@ -85,16 +96,23 @@ public class RequestDomainService
             {
                 if (!string.IsNullOrWhiteSpace(employeeEmail))
                 {
+                    _logger.LogInformation("[REQUEST] Sending decision notification. requestId={RequestId} approved={Approved} employeeEmail={EmployeeEmail}", request.Id, approved, employeeEmail);
                     await _emailService.SendDecisionNotificationAsync(
                         employeeEmail,
                         request.EmployeeName,
                         request.Date.ToString("yyyy-MM-dd"),
                         approved,
                         adminUsername);
+                    _logger.LogInformation("[REQUEST] Decision notification finished. requestId={RequestId}", request.Id);
+                }
+                else
+                {
+                    _logger.LogWarning("[REQUEST] Decision notification skipped: missing employee email. requestId={RequestId}", request.Id);
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "[REQUEST] Failed to send decision notification. requestId={RequestId}", request.Id);
             }
         });
 

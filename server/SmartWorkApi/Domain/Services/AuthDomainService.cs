@@ -4,11 +4,13 @@ public class AuthDomainService
 {
     private readonly ISessionStore _sessionStore;
     private readonly EmailService _emailService;
+    private readonly ILogger<AuthDomainService> _logger;
 
-    public AuthDomainService(ISessionStore sessionStore, EmailService emailService)
+    public AuthDomainService(ISessionStore sessionStore, EmailService emailService, ILogger<AuthDomainService> logger)
     {
         _sessionStore = sessionStore;
         _emailService = emailService;
+        _logger = logger;
     }
 
     // Handles authentication and legacy password migration in one place.
@@ -57,11 +59,17 @@ public class AuthDomainService
 
     public async Task<ForgotPasswordStatus> ForgotPasswordAsync(ForgotDto dto, AppDbContext db, CancellationToken cancellationToken = default)
     {
+        _logger.LogInformation("[AUTH] ForgotPassword requested for email={Email}", dto.Email);
+
         var user = await db.Users.FirstOrDefaultAsync(
             u => u.Email != null && u.Email.ToLower() == dto.Email.ToLower(),
             cancellationToken);
 
-        if (user == null) return ForgotPasswordStatus.NotFound;
+        if (user == null)
+        {
+            _logger.LogWarning("[AUTH] ForgotPassword user not found for email={Email}", dto.Email);
+            return ForgotPasswordStatus.NotFound;
+        }
 
         var tempPassword = PasswordHelper.GenerateTemporaryPassword(10);
         user.PasswordHash = PasswordHelper.HashPassword(tempPassword);
@@ -69,7 +77,9 @@ public class AuthDomainService
         user.ForcePasswordChange = true;
         await db.SaveChangesAsync(cancellationToken);
 
+        _logger.LogInformation("[AUTH] Temporary password generated and saved for username={Username}. Sending email...", user.Username);
         var sent = await _emailService.SendTemporaryPasswordAsync(user.Email ?? "", user.Username, tempPassword);
+        _logger.LogInformation("[AUTH] ForgotPassword email send result for username={Username}: sent={Sent}", user.Username, sent);
         return sent ? ForgotPasswordStatus.Success : ForgotPasswordStatus.EmailError;
     }
 
