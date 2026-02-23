@@ -50,6 +50,7 @@ Variabili ambiente consigliate:
 Per invio email **affidabile su Render** (consigliato):
 
 - `SENDGRID_API_KEY=...`
+- (alias supportati: `SENDGRID_KEY`, `SENDGRID_APIKEY`)
 - `EMAIL_TRANSPORT=sendgrid` (oppure `auto` per fallback)
 
 Se vuoi usare SMTP classico:
@@ -60,6 +61,7 @@ Se vuoi usare SMTP classico:
 - `SMTP_PORT=587`
 - `SMTP_SECURE=StartTls`
 - `SMTP_TIMEOUT_MS=20000`
+- `SMTP_GMAIL_465_FALLBACK=true` (default: prova automaticamente porta 465 SSL se 587 fallisce)
 
 Nota: su alcuni hosting la porta SMTP in uscita può essere filtrata; il trasporto `sendgrid` usa HTTPS (porta 443) e di solito evita questi timeout.
 

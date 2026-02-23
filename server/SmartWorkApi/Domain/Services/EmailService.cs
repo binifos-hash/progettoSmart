@@ -42,9 +42,25 @@ public class EmailService
         return (username, password);
     }
 
-    private static string? GetSendGridApiKey()
+    private static (string? ApiKey, string Source) GetSendGridApiKey()
     {
-        return Environment.GetEnvironmentVariable("SENDGRID_API_KEY");
+        var candidates = new[]
+        {
+            "SENDGRID_API_KEY",
+            "SENDGRID_KEY",
+            "SENDGRID_APIKEY"
+        };
+
+        foreach (var key in candidates)
+        {
+            var value = Environment.GetEnvironmentVariable(key);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return (value, key);
+            }
+        }
+
+        return (null, "(none)");
     }
 
     private static string GetTransportMode()
@@ -163,9 +179,30 @@ public class EmailService
         return value.Length <= maxLen ? value : value[..maxLen] + "...";
     }
 
-    private async Task SendEmailViaSmtpAsync(MimeMessage message, string username, string password, string operationId)
+    private static bool IsSmtpConnectTransient(Exception ex)
     {
-        var settings = GetSmtpSettings();
+        return ex is TimeoutException
+            || ex is OperationCanceledException
+            || ex is SocketException;
+    }
+
+    private static bool ShouldTryGmail465Fallback(SmtpSettings settings)
+    {
+        var enabledRaw = Environment.GetEnvironmentVariable("SMTP_GMAIL_465_FALLBACK");
+        var enabled = string.IsNullOrWhiteSpace(enabledRaw)
+            || enabledRaw.Equals("1", StringComparison.OrdinalIgnoreCase)
+            || enabledRaw.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || enabledRaw.Equals("yes", StringComparison.OrdinalIgnoreCase);
+
+        return enabled
+            && settings.Host.Equals("smtp.gmail.com", StringComparison.OrdinalIgnoreCase)
+            && settings.Port == 587
+            && settings.SecureSocketOptions == SecureSocketOptions.StartTls;
+    }
+
+    private async Task SendEmailViaSmtpWithSettingsAsync(MimeMessage message, string username, string password, string operationId, SmtpSettings settings, string attemptLabel)
+    {
+        _logger.LogInformation("[EMAIL:{OperationId}] SMTP attempt={AttemptLabel}", operationId, attemptLabel);
         LogSmtpConfiguration(operationId, settings, username);
         await LogNetworkDiagnosticsAsync(operationId, settings);
 
@@ -230,6 +267,33 @@ public class EmailService
                 client.IsConnected,
                 client.IsAuthenticated);
             throw;
+        }
+    }
+
+    private async Task SendEmailViaSmtpAsync(MimeMessage message, string username, string password, string operationId)
+    {
+        var primarySettings = GetSmtpSettings();
+
+        try
+        {
+            await SendEmailViaSmtpWithSettingsAsync(message, username, password, operationId, primarySettings, "primary");
+            return;
+        }
+        catch (Exception ex) when (IsSmtpConnectTransient(ex) && ShouldTryGmail465Fallback(primarySettings))
+        {
+            _logger.LogWarning(ex,
+                "[EMAIL:{OperationId}] Primary SMTP connection failed. Trying Gmail fallback on 465/SSL.",
+                operationId);
+
+            var fallbackSettings = new SmtpSettings
+            {
+                Host = primarySettings.Host,
+                Port = 465,
+                SecureSocketOptions = SecureSocketOptions.SslOnConnect,
+                TimeoutMs = primarySettings.TimeoutMs
+            };
+
+            await SendEmailViaSmtpWithSettingsAsync(message, username, password, operationId, fallbackSettings, "gmail-465-fallback");
         }
     }
 
@@ -323,14 +387,15 @@ public class EmailService
     private async Task SendEmailThroughConfiguredTransportAsync(MimeMessage message, string operationId)
     {
         var mode = GetTransportMode();
-        var sendGridApiKey = GetSendGridApiKey();
+        var (sendGridApiKey, sendGridSource) = GetSendGridApiKey();
         var hasSendGrid = !string.IsNullOrWhiteSpace(sendGridApiKey);
 
         _logger.LogInformation(
-            "[EMAIL:{OperationId}] Transport selection. mode={Mode} hasSendGridKey={HasSendGrid}",
+            "[EMAIL:{OperationId}] Transport selection. mode={Mode} hasSendGridKey={HasSendGrid} sendGridKeySource={SendGridKeySource}",
             operationId,
             mode,
-            hasSendGrid);
+            hasSendGrid,
+            sendGridSource);
 
         if (mode == "sendgrid")
         {
