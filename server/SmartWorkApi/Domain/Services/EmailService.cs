@@ -5,9 +5,17 @@ using System.Globalization;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 
 public class EmailService
 {
+    private static readonly HttpClient SendGridHttpClient = new()
+    {
+        Timeout = TimeSpan.FromSeconds(30)
+    };
+
     private readonly ILogger<EmailService> _logger;
 
     public EmailService(ILogger<EmailService> logger)
@@ -32,6 +40,35 @@ public class EmailService
             ?? throw new InvalidOperationException("SMTP_PASSWORD environment variable is required");
 
         return (username, password);
+    }
+
+    private static string? GetSendGridApiKey()
+    {
+        return Environment.GetEnvironmentVariable("SENDGRID_API_KEY");
+    }
+
+    private static string GetTransportMode()
+    {
+        var mode = Environment.GetEnvironmentVariable("EMAIL_TRANSPORT");
+        if (string.IsNullOrWhiteSpace(mode)) return "auto";
+
+        return mode.Trim().ToLowerInvariant() switch
+        {
+            "smtp" => "smtp",
+            "sendgrid" => "sendgrid",
+            _ => "auto"
+        };
+    }
+
+    private static string ResolveFromAddress()
+    {
+        var from = Environment.GetEnvironmentVariable("EMAIL_FROM");
+        if (!string.IsNullOrWhiteSpace(from)) return from;
+
+        var smtpUser = Environment.GetEnvironmentVariable("SMTP_USERNAME");
+        if (!string.IsNullOrWhiteSpace(smtpUser)) return smtpUser;
+
+        throw new InvalidOperationException("EMAIL_FROM or SMTP_USERNAME environment variable is required");
     }
 
     private static SmtpSettings GetSmtpSettings()
@@ -120,7 +157,13 @@ public class EmailService
             hasPassword);
     }
 
-    private async Task SendEmailAsync(MimeMessage message, string username, string password, string operationId)
+    private static string TruncateForLog(string? value, int maxLen = 400)
+    {
+        if (string.IsNullOrEmpty(value)) return "(empty)";
+        return value.Length <= maxLen ? value : value[..maxLen] + "...";
+    }
+
+    private async Task SendEmailViaSmtpAsync(MimeMessage message, string username, string password, string operationId)
     {
         var settings = GetSmtpSettings();
         LogSmtpConfiguration(operationId, settings, username);
@@ -188,6 +231,134 @@ public class EmailService
                 client.IsAuthenticated);
             throw;
         }
+    }
+
+    private async Task SendEmailViaSendGridAsync(MimeMessage message, string operationId, string apiKey)
+    {
+        var from = message.From.Mailboxes.FirstOrDefault();
+        var recipients = message.To.Mailboxes.ToList();
+
+        if (from == null)
+        {
+            throw new InvalidOperationException("Message 'From' is required for SendGrid transport.");
+        }
+
+        if (recipients.Count == 0)
+        {
+            throw new InvalidOperationException("Message must contain at least one recipient for SendGrid transport.");
+        }
+
+        var textBody = message.TextBody;
+        var htmlBody = message.HtmlBody;
+
+        if (string.IsNullOrWhiteSpace(textBody) && string.IsNullOrWhiteSpace(htmlBody))
+        {
+            throw new InvalidOperationException("Message body is empty.");
+        }
+
+        var contentList = new List<object>();
+        if (!string.IsNullOrWhiteSpace(textBody))
+        {
+            contentList.Add(new { type = "text/plain", value = textBody });
+        }
+
+        if (!string.IsNullOrWhiteSpace(htmlBody))
+        {
+            contentList.Add(new { type = "text/html", value = htmlBody });
+        }
+
+        var payload = new
+        {
+            personalizations = new[]
+            {
+                new
+                {
+                    to = recipients.Select(r => new { email = r.Address, name = string.IsNullOrWhiteSpace(r.Name) ? null : r.Name }).ToArray(),
+                    subject = message.Subject
+                }
+            },
+            from = new
+            {
+                email = from.Address,
+                name = string.IsNullOrWhiteSpace(from.Name) ? "SmartWork" : from.Name
+            },
+            content = contentList
+        };
+
+        var body = JsonSerializer.Serialize(payload);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.sendgrid.com/v3/mail/send")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+
+        _logger.LogInformation(
+            "[EMAIL:{OperationId}] Sending via SendGrid API. from={From} to={To} subject='{Subject}'",
+            operationId,
+            MaskEmail(from.Address),
+            string.Join(",", recipients.Select(r => MaskEmail(r.Address))),
+            message.Subject);
+
+        var sw = Stopwatch.StartNew();
+        using var response = await SendGridHttpClient.SendAsync(request);
+        var responseBody = await response.Content.ReadAsStringAsync();
+        sw.Stop();
+
+        if ((int)response.StatusCode != 202)
+        {
+            _logger.LogError(
+                "[EMAIL:{OperationId}] SendGrid API failed in {ElapsedMs}ms. status={StatusCode} body={Body}",
+                operationId,
+                sw.ElapsedMilliseconds,
+                (int)response.StatusCode,
+                TruncateForLog(responseBody));
+
+            throw new InvalidOperationException($"SendGrid API failed with status {(int)response.StatusCode}: {TruncateForLog(responseBody, 800)}");
+        }
+
+        _logger.LogInformation("[EMAIL:{OperationId}] SendGrid API accepted message in {ElapsedMs}ms.", operationId, sw.ElapsedMilliseconds);
+    }
+
+    private async Task SendEmailThroughConfiguredTransportAsync(MimeMessage message, string operationId)
+    {
+        var mode = GetTransportMode();
+        var sendGridApiKey = GetSendGridApiKey();
+        var hasSendGrid = !string.IsNullOrWhiteSpace(sendGridApiKey);
+
+        _logger.LogInformation(
+            "[EMAIL:{OperationId}] Transport selection. mode={Mode} hasSendGridKey={HasSendGrid}",
+            operationId,
+            mode,
+            hasSendGrid);
+
+        if (mode == "sendgrid")
+        {
+            if (!hasSendGrid)
+            {
+                throw new InvalidOperationException("EMAIL_TRANSPORT=sendgrid but SENDGRID_API_KEY is not configured.");
+            }
+
+            await SendEmailViaSendGridAsync(message, operationId, sendGridApiKey!);
+            return;
+        }
+
+        if (mode == "auto" && hasSendGrid)
+        {
+            try
+            {
+                await SendEmailViaSendGridAsync(message, operationId, sendGridApiKey!);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[EMAIL:{OperationId}] SendGrid transport failed in auto mode, falling back to SMTP.", operationId);
+            }
+        }
+
+        var (smtpUsername, smtpPassword) = GetCredentials();
+        _logger.LogInformation("[EMAIL:{OperationId}] SMTP credentials loaded successfully for user {SmtpUser}", operationId, MaskEmail(smtpUsername));
+        await SendEmailViaSmtpAsync(message, smtpUsername, smtpPassword, operationId);
     }
 
     private async Task LogNetworkDiagnosticsAsync(string operationId, SmtpSettings settings)
@@ -263,11 +434,10 @@ public class EmailService
                 employeeName,
                 dateString);
 
-            var (username, password) = GetCredentials();
-            _logger.LogInformation("[EMAIL:{OperationId}] SMTP credentials loaded successfully for user {SmtpUser}", operationId, MaskEmail(username));
+            var fromAddress = ResolveFromAddress();
 
             var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SmartWork", username));
+            message.From.Add(new MailboxAddress("SmartWork", fromAddress));
             message.To.Add(new MailboxAddress("Admin", toEmail));
             message.Subject = "Nuova Richiesta di Smart Working";
             message.Body = new BodyBuilder
@@ -280,7 +450,7 @@ Data: {dateString}
 Accedi al sistema per revisione e approvazione."
             }.ToMessageBody();
 
-            await SendEmailAsync(message, username, password, operationId);
+            await SendEmailThroughConfiguredTransportAsync(message, operationId);
             _logger.LogInformation("[EMAIL:{OperationId}] SendRequestNotificationAsync completed successfully.", operationId);
             return true;
         }
@@ -309,11 +479,10 @@ Accedi al sistema per revisione e approvazione."
                 approved,
                 decidedBy);
 
-            var (username, password) = GetCredentials();
-            _logger.LogInformation("[EMAIL:{OperationId}] SMTP credentials loaded successfully for user {SmtpUser}", operationId, MaskEmail(username));
+            var fromAddress = ResolveFromAddress();
 
             var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SmartWork", username));
+            message.From.Add(new MailboxAddress("SmartWork", fromAddress));
             message.To.Add(new MailboxAddress(employeeName, toEmail));
             message.Subject = approved ? "Richiesta approvata" : "Richiesta rifiutata";
             message.Body = new BodyBuilder
@@ -323,7 +492,7 @@ Accedi al sistema per revisione e approvazione."
                     : $"La tua richiesta di smart working per il {dateString} è stata rifiutata da {decidedBy}."
             }.ToMessageBody();
 
-            await SendEmailAsync(message, username, password, operationId);
+            await SendEmailThroughConfiguredTransportAsync(message, operationId);
             _logger.LogInformation("[EMAIL:{OperationId}] SendDecisionNotificationAsync completed successfully.", operationId);
             return true;
         }
@@ -350,11 +519,10 @@ Accedi al sistema per revisione e approvazione."
                 username,
                 string.IsNullOrEmpty(tempPassword) ? 0 : tempPassword.Length);
 
-            var (smtpUsername, smtpPassword) = GetCredentials();
-            _logger.LogInformation("[EMAIL:{OperationId}] SMTP credentials loaded successfully for user {SmtpUser}", operationId, MaskEmail(smtpUsername));
+            var fromAddress = ResolveFromAddress();
 
             var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SmartWork", smtpUsername));
+            message.From.Add(new MailboxAddress("SmartWork", fromAddress));
             message.To.Add(new MailboxAddress(username, toEmail));
             message.Subject = "Password temporanea SmartWork";
             message.Body = new BodyBuilder
@@ -367,7 +535,7 @@ Password temporanea: {tempPassword}
 Effettua l'accesso e cambia la password al più presto."
             }.ToMessageBody();
 
-            await SendEmailAsync(message, smtpUsername, smtpPassword, operationId);
+            await SendEmailThroughConfiguredTransportAsync(message, operationId);
 
             _logger.LogInformation("[EMAIL:{OperationId}] SendTemporaryPasswordAsync completed successfully.", operationId);
 

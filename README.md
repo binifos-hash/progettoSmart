@@ -44,8 +44,24 @@ Per vedere il frontend online devi pubblicare **due servizi**:
 Variabili ambiente consigliate:
 
 - `ALLOWED_ORIGINS=https://<tuo-frontend>.onrender.com,https://progettosmart.onrender.com`
-- `SMTP_USERNAME=...` (opzionale, per email)
-- `SMTP_PASSWORD=...` (opzionale, per email)
+- `EMAIL_TRANSPORT=auto` (`auto` | `sendgrid` | `smtp`)
+- `EMAIL_FROM=...` (mittente email, es. `noreply@tuodominio.it`)
+
+Per invio email **affidabile su Render** (consigliato):
+
+- `SENDGRID_API_KEY=...`
+- `EMAIL_TRANSPORT=sendgrid` (oppure `auto` per fallback)
+
+Se vuoi usare SMTP classico:
+
+- `SMTP_USERNAME=...`
+- `SMTP_PASSWORD=...`
+- `SMTP_HOST=smtp.gmail.com`
+- `SMTP_PORT=587`
+- `SMTP_SECURE=StartTls`
+- `SMTP_TIMEOUT_MS=20000`
+
+Nota: su alcuni hosting la porta SMTP in uscita può essere filtrata; il trasporto `sendgrid` usa HTTPS (porta 443) e di solito evita questi timeout.
 
 ### 2) Frontend React (Static Site)
 
