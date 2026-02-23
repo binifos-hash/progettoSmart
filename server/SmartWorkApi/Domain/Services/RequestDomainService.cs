@@ -56,8 +56,15 @@ public class RequestDomainService
             try
             {
                 _logger.LogInformation("[REQUEST] Sending new request notification. requestId={RequestId} employee={EmployeeName} date={Date}", request.Id, request.EmployeeName, request.Date.ToString("yyyy-MM-dd"));
-                await _emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, request.Date.ToString("yyyy-MM-dd"));
-                _logger.LogInformation("[REQUEST] New request notification finished. requestId={RequestId}", request.Id);
+                var sent = await _emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, request.Date.ToString("yyyy-MM-dd"));
+                if (sent)
+                {
+                    _logger.LogInformation("[REQUEST] New request notification sent. requestId={RequestId}", request.Id);
+                }
+                else
+                {
+                    _logger.LogWarning("[REQUEST] New request notification failed. requestId={RequestId}", request.Id);
+                }
             }
             catch (Exception ex)
             {
@@ -97,13 +104,21 @@ public class RequestDomainService
                 if (!string.IsNullOrWhiteSpace(employeeEmail))
                 {
                     _logger.LogInformation("[REQUEST] Sending decision notification. requestId={RequestId} approved={Approved} employeeEmail={EmployeeEmail}", request.Id, approved, employeeEmail);
-                    await _emailService.SendDecisionNotificationAsync(
+                    var sent = await _emailService.SendDecisionNotificationAsync(
                         employeeEmail,
                         request.EmployeeName,
                         request.Date.ToString("yyyy-MM-dd"),
                         approved,
                         adminUsername);
-                    _logger.LogInformation("[REQUEST] Decision notification finished. requestId={RequestId}", request.Id);
+
+                    if (sent)
+                    {
+                        _logger.LogInformation("[REQUEST] Decision notification sent. requestId={RequestId}", request.Id);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("[REQUEST] Decision notification failed. requestId={RequestId}", request.Id);
+                    }
                 }
                 else
                 {

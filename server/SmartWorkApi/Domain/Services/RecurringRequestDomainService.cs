@@ -56,8 +56,15 @@ public class RecurringRequestDomainService
             try
             {
                 _logger.LogInformation("[RECURRING] Sending new recurring request notification. requestId={RequestId} employee={EmployeeName} day={DayName}", request.Id, request.EmployeeName, request.DayName);
-                await _emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, $"ogni {request.DayName}");
-                _logger.LogInformation("[RECURRING] New recurring request notification finished. requestId={RequestId}", request.Id);
+                var sent = await _emailService.SendRequestNotificationAsync("paolo.bini@fos.it", request.EmployeeName, $"ogni {request.DayName}");
+                if (sent)
+                {
+                    _logger.LogInformation("[RECURRING] New recurring request notification sent. requestId={RequestId}", request.Id);
+                }
+                else
+                {
+                    _logger.LogWarning("[RECURRING] New recurring request notification failed. requestId={RequestId}", request.Id);
+                }
             }
             catch (Exception ex)
             {
@@ -91,13 +98,21 @@ public class RecurringRequestDomainService
                 if (!string.IsNullOrWhiteSpace(employeeEmail))
                 {
                     _logger.LogInformation("[RECURRING] Sending decision notification. requestId={RequestId} approved={Approved} employeeEmail={EmployeeEmail}", request.Id, approved, employeeEmail);
-                    await _emailService.SendDecisionNotificationAsync(
+                    var sent = await _emailService.SendDecisionNotificationAsync(
                         employeeEmail,
                         request.EmployeeName,
                         $"ogni {request.DayName}",
                         approved,
                         adminUsername);
-                    _logger.LogInformation("[RECURRING] Decision notification finished. requestId={RequestId}", request.Id);
+
+                    if (sent)
+                    {
+                        _logger.LogInformation("[RECURRING] Decision notification sent. requestId={RequestId}", request.Id);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("[RECURRING] Decision notification failed. requestId={RequestId}", request.Id);
+                    }
                 }
                 else
                 {

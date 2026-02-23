@@ -3,6 +3,8 @@ using MailKit.Security;
 using MimeKit;
 using System.Globalization;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 
 public class EmailService
 {
@@ -122,6 +124,7 @@ public class EmailService
     {
         var settings = GetSmtpSettings();
         LogSmtpConfiguration(operationId, settings, username);
+        await LogNetworkDiagnosticsAsync(operationId, settings);
 
         var totalSw = Stopwatch.StartNew();
 
@@ -187,7 +190,68 @@ public class EmailService
         }
     }
 
-    public async Task SendRequestNotificationAsync(string toEmail, string employeeName, string dateString)
+    private async Task LogNetworkDiagnosticsAsync(string operationId, SmtpSettings settings)
+    {
+        try
+        {
+            _logger.LogInformation("[EMAIL:{OperationId}] Resolving SMTP host DNS... host={Host}", operationId, settings.Host);
+            var dnsSw = Stopwatch.StartNew();
+            var addresses = await Dns.GetHostAddressesAsync(settings.Host);
+            dnsSw.Stop();
+
+            var printableAddresses = addresses.Length == 0
+                ? "(none)"
+                : string.Join(",", addresses.Select(a => $"{a}({a.AddressFamily})"));
+
+            _logger.LogInformation(
+                "[EMAIL:{OperationId}] DNS resolved in {ElapsedMs}ms. addressCount={AddressCount} addresses={Addresses}",
+                operationId,
+                dnsSw.ElapsedMilliseconds,
+                addresses.Length,
+                printableAddresses);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[EMAIL:{OperationId}] DNS resolution failed for host={Host}",
+                operationId,
+                settings.Host);
+        }
+
+        try
+        {
+            using var tcpProbe = new TcpClient(AddressFamily.InterNetwork);
+            using var probeCts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+            var probeSw = Stopwatch.StartNew();
+
+            _logger.LogInformation(
+                "[EMAIL:{OperationId}] TCP probe start. host={Host} port={Port} timeoutMs={TimeoutMs}",
+                operationId,
+                settings.Host,
+                settings.Port,
+                4000);
+
+            await tcpProbe.ConnectAsync(settings.Host, settings.Port, probeCts.Token);
+            probeSw.Stop();
+
+            _logger.LogInformation(
+                "[EMAIL:{OperationId}] TCP probe OK in {ElapsedMs}ms. local={LocalEndPoint} remote={RemoteEndPoint}",
+                operationId,
+                probeSw.ElapsedMilliseconds,
+                tcpProbe.Client.LocalEndPoint?.ToString() ?? "(null)",
+                tcpProbe.Client.RemoteEndPoint?.ToString() ?? "(null)");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[EMAIL:{OperationId}] TCP probe FAILED. host={Host} port={Port}",
+                operationId,
+                settings.Host,
+                settings.Port);
+        }
+    }
+
+    public async Task<bool> SendRequestNotificationAsync(string toEmail, string employeeName, string dateString)
     {
         var operationId = Guid.NewGuid().ToString("N");
         try
@@ -218,6 +282,7 @@ Accedi al sistema per revisione e approvazione."
 
             await SendEmailAsync(message, username, password, operationId);
             _logger.LogInformation("[EMAIL:{OperationId}] SendRequestNotificationAsync completed successfully.", operationId);
+            return true;
         }
         catch (Exception ex)
         {
@@ -226,10 +291,11 @@ Accedi al sistema per revisione e approvazione."
                 operationId,
                 ex.Message,
                 ex.InnerException?.Message ?? "(none)");
+            return false;
         }
     }
 
-    public async Task SendDecisionNotificationAsync(string toEmail, string employeeName, string dateString, bool approved, string decidedBy)
+    public async Task<bool> SendDecisionNotificationAsync(string toEmail, string employeeName, string dateString, bool approved, string decidedBy)
     {
         var operationId = Guid.NewGuid().ToString("N");
         try
@@ -259,6 +325,7 @@ Accedi al sistema per revisione e approvazione."
 
             await SendEmailAsync(message, username, password, operationId);
             _logger.LogInformation("[EMAIL:{OperationId}] SendDecisionNotificationAsync completed successfully.", operationId);
+            return true;
         }
         catch (Exception ex)
         {
@@ -267,6 +334,7 @@ Accedi al sistema per revisione e approvazione."
                 operationId,
                 ex.Message,
                 ex.InnerException?.Message ?? "(none)");
+            return false;
         }
     }
 
