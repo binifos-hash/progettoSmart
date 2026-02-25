@@ -5,7 +5,7 @@ public static class RecurringRequestEndpoints
         app.MapGet("/recurring-requests", async (HttpRequest req, AppDbContext db, ICurrentUserService currentUserService, RecurringRequestDomainService recurringDomain, CancellationToken ct) =>
         {
             var user = await currentUserService.GetCurrentUserAsync(req, db, ct);
-            if (user == null || user.Role != "Admin") return Results.Unauthorized();
+            if (user == null || !RoleHelper.IsAdmin(user.Role)) return Results.Unauthorized();
 
             return Results.Ok(await recurringDomain.GetAllAsync(db, ct));
         });
@@ -31,7 +31,7 @@ public static class RecurringRequestEndpoints
         app.MapPost("/recurring-requests/{id}/approve", async (HttpRequest req, int id, AppDbContext db, ICurrentUserService currentUserService, RecurringRequestDomainService recurringDomain, CancellationToken ct) =>
         {
             var user = await currentUserService.GetCurrentUserAsync(req, db, ct);
-            if (user == null || user.Role != "Admin") return Results.Unauthorized();
+            if (user == null || !RoleHelper.IsAdmin(user.Role)) return Results.Unauthorized();
 
             var updated = await recurringDomain.SetDecisionAsync(id, true, user.Username, db, ct);
             return updated == null ? Results.NotFound() : Results.Ok(updated);
@@ -40,7 +40,7 @@ public static class RecurringRequestEndpoints
         app.MapPost("/recurring-requests/{id}/reject", async (HttpRequest req, int id, AppDbContext db, ICurrentUserService currentUserService, RecurringRequestDomainService recurringDomain, CancellationToken ct) =>
         {
             var user = await currentUserService.GetCurrentUserAsync(req, db, ct);
-            if (user == null || user.Role != "Admin") return Results.Unauthorized();
+            if (user == null || !RoleHelper.IsAdmin(user.Role)) return Results.Unauthorized();
 
             var updated = await recurringDomain.SetDecisionAsync(id, false, user.Username, db, ct);
             return updated == null ? Results.NotFound() : Results.Ok(updated);

@@ -45,7 +45,7 @@ public class UserDomainService
             Username = dto.Username,
             DisplayName = dto.DisplayName,
             Email = dto.Email,
-            Role = string.IsNullOrWhiteSpace(dto.Role) ? "Employee" : dto.Role,
+            Role = RoleHelper.Normalize(dto.Role),
             PasswordHash = PasswordHelper.HashPassword(tempPassword),
             PasswordSetAt = DateTime.UtcNow,
             ForcePasswordChange = true,
@@ -84,9 +84,9 @@ public class UserDomainService
 
         if (target.Username == adminUsername) return DeleteUserStatus.CannotDeleteYourself;
 
-        if (target.Role == "Admin")
+        if (RoleHelper.IsAdmin(target.Role))
         {
-            var admins = await db.Users.CountAsync(u => u.Role == "Admin", cancellationToken);
+            var admins = await db.Users.CountAsync(u => u.Role != null && u.Role.Trim().ToLower() == "admin", cancellationToken);
             if (admins <= 1) return DeleteUserStatus.CannotDeleteLastAdmin;
         }
 

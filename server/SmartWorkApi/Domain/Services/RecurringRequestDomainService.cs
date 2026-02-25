@@ -132,7 +132,7 @@ public class RecurringRequestDomainService
     {
         var request = await db.RecurringRequests.FirstOrDefaultAsync(r => r.Id == id, cancellationToken);
         if (request == null) return EntityDeleteStatus.NotFound;
-        if (request.EmployeeUsername != user.Username && user.Role != "Admin") return EntityDeleteStatus.Forbidden;
+        if (request.EmployeeUsername != user.Username && !RoleHelper.IsAdmin(user.Role)) return EntityDeleteStatus.Forbidden;
 
         db.RecurringRequests.Remove(request);
         await db.SaveChangesAsync(cancellationToken);

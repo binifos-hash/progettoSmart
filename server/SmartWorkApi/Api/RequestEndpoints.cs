@@ -5,7 +5,7 @@ public static class RequestEndpoints
         app.MapGet("/requests", async (HttpRequest req, AppDbContext db, ICurrentUserService currentUserService, RequestDomainService requestDomain, CancellationToken ct) =>
         {
             var user = await currentUserService.GetCurrentUserAsync(req, db, ct);
-            if (user == null || user.Role != "Admin") return Results.Unauthorized();
+            if (user == null || !RoleHelper.IsAdmin(user.Role)) return Results.Unauthorized();
 
             return Results.Ok(await requestDomain.GetAllAsync(db, ct));
         });
@@ -31,7 +31,7 @@ public static class RequestEndpoints
         app.MapPost("/requests/{id}/approve", async (HttpRequest req, int id, AppDbContext db, ICurrentUserService currentUserService, RequestDomainService requestDomain, CancellationToken ct) =>
         {
             var user = await currentUserService.GetCurrentUserAsync(req, db, ct);
-            if (user == null || user.Role != "Admin") return Results.Unauthorized();
+            if (user == null || !RoleHelper.IsAdmin(user.Role)) return Results.Unauthorized();
 
             var updated = await requestDomain.SetDecisionAsync(id, true, user.Username, db, ct);
             return updated == null ? Results.NotFound() : Results.Ok(updated);
@@ -40,7 +40,7 @@ public static class RequestEndpoints
         app.MapPost("/requests/{id}/reject", async (HttpRequest req, int id, AppDbContext db, ICurrentUserService currentUserService, RequestDomainService requestDomain, CancellationToken ct) =>
         {
             var user = await currentUserService.GetCurrentUserAsync(req, db, ct);
-            if (user == null || user.Role != "Admin") return Results.Unauthorized();
+            if (user == null || !RoleHelper.IsAdmin(user.Role)) return Results.Unauthorized();
 
             var updated = await requestDomain.SetDecisionAsync(id, false, user.Username, db, ct);
             return updated == null ? Results.NotFound() : Results.Ok(updated);

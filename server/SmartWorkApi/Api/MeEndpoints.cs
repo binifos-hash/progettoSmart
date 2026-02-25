@@ -21,7 +21,7 @@ public static class MeEndpoints
         {
             var user = await currentUserService.GetCurrentUserAsync(req, db, ct);
             if (user == null) return Results.Unauthorized();
-            return Results.Ok(new { username = user.Username, role = user.Role, email = user.Email, theme = user.Theme });
+            return Results.Ok(new { username = user.Username, role = RoleHelper.Normalize(user.Role), email = user.Email, theme = user.Theme });
         });
 
         app.MapPost("/me/theme", async (HttpRequest req, ThemeDto dto, AppDbContext db, ICurrentUserService currentUserService, UserDomainService userDomain, CancellationToken ct) =>

@@ -5,7 +5,7 @@ public static class UserEndpoints
         app.MapGet("/users", async (HttpRequest req, AppDbContext db, ICurrentUserService currentUserService, UserDomainService userDomain, CancellationToken ct) =>
         {
             var user = await currentUserService.GetCurrentUserAsync(req, db, ct);
-            if (user == null || user.Role != "Admin") return Results.Unauthorized();
+            if (user == null || !RoleHelper.IsAdmin(user.Role)) return Results.Unauthorized();
 
             var users = await userDomain.GetUsersAsync(db, ct);
             return Results.Ok(users.Select(u => new { username = u.Username, displayName = u.DisplayName, email = u.Email, role = u.Role }));
@@ -14,7 +14,7 @@ public static class UserEndpoints
         app.MapPost("/users", async (HttpRequest req, CreateUserDto dto, AppDbContext db, ICurrentUserService currentUserService, UserDomainService userDomain, CancellationToken ct) =>
         {
             var admin = await currentUserService.GetCurrentUserAsync(req, db, ct);
-            if (admin == null || admin.Role != "Admin") return Results.Unauthorized();
+            if (admin == null || !RoleHelper.IsAdmin(admin.Role)) return Results.Unauthorized();
 
             var result = await userDomain.CreateUserAsync(dto, db, ct);
             return result.Status switch
@@ -34,7 +34,7 @@ public static class UserEndpoints
         app.MapDelete("/users/{username}", async (HttpRequest req, string username, AppDbContext db, ICurrentUserService currentUserService, UserDomainService userDomain, CancellationToken ct) =>
         {
             var admin = await currentUserService.GetCurrentUserAsync(req, db, ct);
-            if (admin == null || admin.Role != "Admin") return Results.Unauthorized();
+            if (admin == null || !RoleHelper.IsAdmin(admin.Role)) return Results.Unauthorized();
 
             var result = await userDomain.DeleteUserAsync(admin.Username, username, db, ct);
             return result switch

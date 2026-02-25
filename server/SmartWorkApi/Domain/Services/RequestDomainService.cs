@@ -138,7 +138,7 @@ public class RequestDomainService
     {
         var request = await db.Requests.FirstOrDefaultAsync(r => r.Id == id, cancellationToken);
         if (request == null) return EntityDeleteStatus.NotFound;
-        if (request.EmployeeUsername != user.Username && user.Role != "Admin") return EntityDeleteStatus.Forbidden;
+        if (request.EmployeeUsername != user.Username && !RoleHelper.IsAdmin(user.Role)) return EntityDeleteStatus.Forbidden;
 
         db.Requests.Remove(request);
         await db.SaveChangesAsync(cancellationToken);

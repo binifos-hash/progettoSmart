@@ -50,7 +50,7 @@ public class AuthDomainService
         {
             Token = token,
             Username = user.Username,
-            Role = user.Role,
+            Role = RoleHelper.Normalize(user.Role),
             Email = user.Email,
             Theme = user.Theme,
             ForcePasswordChange = user.ForcePasswordChange
