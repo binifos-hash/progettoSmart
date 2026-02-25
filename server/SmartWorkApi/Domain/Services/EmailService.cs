@@ -186,6 +186,76 @@ public class EmailService
             || ex is SocketException;
     }
 
+    private static bool IsTruthy(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value) && (
+            value.Equals("1", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("yes", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("on", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsIpv6Enabled()
+    {
+        var raw = Environment.GetEnvironmentVariable("SMTP_ENABLE_IPV6");
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+
+        return IsTruthy(raw.Trim());
+    }
+
+    private static int GetDnsRoundCount()
+    {
+        var raw = Environment.GetEnvironmentVariable("SMTP_DNS_ROUNDS");
+        if (string.IsNullOrWhiteSpace(raw)) return 3;
+
+        if (!int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)) return 3;
+        return Math.Clamp(parsed, 1, 8);
+    }
+
+    private static bool ShouldFallbackToSendGridAfterSmtpFailure(string mode)
+    {
+        if (mode.Equals("sendgrid", StringComparison.OrdinalIgnoreCase)) return false;
+
+        var raw = Environment.GetEnvironmentVariable("SMTP_SENDGRID_FALLBACK");
+        if (string.IsNullOrWhiteSpace(raw)) return true;
+
+        return IsTruthy(raw.Trim());
+    }
+
+    private async Task<IReadOnlyList<IPAddress>> ResolveAddressCandidatesAsync(string host, string operationId)
+    {
+        var rounds = GetDnsRoundCount();
+        var includeIpv6 = IsIpv6Enabled();
+        var set = new HashSet<IPAddress>();
+
+        for (var round = 1; round <= rounds; round++)
+        {
+            var roundAddresses = await Dns.GetHostAddressesAsync(host);
+            foreach (var address in roundAddresses)
+            {
+                if (!includeIpv6 && address.AddressFamily == AddressFamily.InterNetworkV6) continue;
+                set.Add(address);
+            }
+
+            if (set.Count > 0 && round >= 2) break;
+        }
+
+        var ordered = OrderAddresses(set.ToArray());
+
+        _logger.LogInformation(
+            "[EMAIL:{OperationId}] Address candidates built. host={Host} dnsRounds={DnsRounds} includeIpv6={IncludeIpv6} candidateCount={Count} candidates={Candidates}",
+            operationId,
+            host,
+            rounds,
+            includeIpv6,
+            ordered.Count,
+            ordered.Count == 0
+                ? "(none)"
+                : string.Join(",", ordered.Select(a => $"{a}({a.AddressFamily})")));
+
+        return ordered;
+    }
+
     private static bool ShouldTryGmail465Fallback(SmtpSettings settings)
     {
         var enabledRaw = Environment.GetEnvironmentVariable("SMTP_GMAIL_465_FALLBACK");
@@ -218,15 +288,14 @@ public class EmailService
 
     private async Task ConnectWithAddressFallbackAsync(SmtpClient client, SmtpSettings settings, string operationId)
     {
-        var addresses = await Dns.GetHostAddressesAsync(settings.Host);
-        if (addresses.Length == 0)
+        var orderedAddresses = await ResolveAddressCandidatesAsync(settings.Host, operationId);
+        if (orderedAddresses.Count == 0)
         {
             _logger.LogWarning("[EMAIL:{OperationId}] DNS returned no addresses for host={Host}. Using default MailKit connect.", operationId, settings.Host);
             await client.ConnectAsync(settings.Host, settings.Port, settings.SecureSocketOptions);
             return;
         }
 
-        var orderedAddresses = OrderAddresses(addresses);
         var perAddressTimeoutMs = GetPerAddressTimeoutMs(settings.TimeoutMs, orderedAddresses.Count);
         Exception? lastException = null;
 
@@ -274,7 +343,9 @@ public class EmailService
             }
         }
 
-        throw new TimeoutException($"Could not connect to SMTP host '{settings.Host}:{settings.Port}' on any resolved address.", lastException);
+        throw new TimeoutException(
+            $"Could not connect to SMTP host '{settings.Host}:{settings.Port}' on any resolved address. This usually indicates outbound SMTP blocked by hosting/network firewall.",
+            lastException);
     }
 
     private async Task SendEmailViaSmtpWithSettingsAsync(MimeMessage message, string username, string password, string operationId, SmtpSettings settings, string attemptLabel)
@@ -350,6 +421,7 @@ public class EmailService
     private async Task SendEmailViaSmtpAsync(MimeMessage message, string username, string password, string operationId)
     {
         var primarySettings = GetSmtpSettings();
+        Exception? lastSmtpException = null;
 
         try
         {
@@ -358,6 +430,7 @@ public class EmailService
         }
         catch (Exception ex) when (IsSmtpConnectTransient(ex) && ShouldTryGmail465Fallback(primarySettings))
         {
+            lastSmtpException = ex;
             _logger.LogWarning(ex,
                 "[EMAIL:{OperationId}] Primary SMTP connection failed. Trying Gmail fallback on 465/SSL.",
                 operationId);
@@ -371,6 +444,20 @@ public class EmailService
             };
 
             await SendEmailViaSmtpWithSettingsAsync(message, username, password, operationId, fallbackSettings, "gmail-465-fallback");
+            return;
+        }
+        catch (Exception ex)
+        {
+            lastSmtpException = ex;
+        }
+
+        if (lastSmtpException != null)
+        {
+            _logger.LogError(lastSmtpException,
+                "[EMAIL:{OperationId}] SMTP transport definitively failed. probableCause='outbound SMTP blocked or network path unavailable'.",
+                operationId);
+
+            throw lastSmtpException;
         }
     }
 
@@ -466,13 +553,15 @@ public class EmailService
         var mode = GetTransportMode();
         var (sendGridApiKey, sendGridSource) = GetSendGridApiKey();
         var hasSendGrid = !string.IsNullOrWhiteSpace(sendGridApiKey);
+        var smtpToSendGridFallbackEnabled = ShouldFallbackToSendGridAfterSmtpFailure(mode);
 
         _logger.LogInformation(
-            "[EMAIL:{OperationId}] Transport selection. mode={Mode} hasSendGridKey={HasSendGrid} sendGridKeySource={SendGridKeySource}",
+            "[EMAIL:{OperationId}] Transport selection. mode={Mode} hasSendGridKey={HasSendGrid} sendGridKeySource={SendGridKeySource} smtpToSendGridFallbackEnabled={SmtpToSendGridFallbackEnabled}",
             operationId,
             mode,
             hasSendGrid,
-            sendGridSource);
+            sendGridSource,
+            smtpToSendGridFallbackEnabled);
 
         if (mode == "sendgrid")
         {
@@ -500,7 +589,19 @@ public class EmailService
 
         var (smtpUsername, smtpPassword) = GetCredentials();
         _logger.LogInformation("[EMAIL:{OperationId}] SMTP credentials loaded successfully for user {SmtpUser}", operationId, MaskEmail(smtpUsername));
-        await SendEmailViaSmtpAsync(message, smtpUsername, smtpPassword, operationId);
+
+        try
+        {
+            await SendEmailViaSmtpAsync(message, smtpUsername, smtpPassword, operationId);
+        }
+        catch (Exception ex) when (hasSendGrid && smtpToSendGridFallbackEnabled && IsSmtpConnectTransient(ex))
+        {
+            _logger.LogWarning(ex,
+                "[EMAIL:{OperationId}] SMTP failed with transient connection error. Falling back to SendGrid API over HTTPS.",
+                operationId);
+
+            await SendEmailViaSendGridAsync(message, operationId, sendGridApiKey!);
+        }
     }
 
     private async Task LogNetworkDiagnosticsAsync(string operationId, SmtpSettings settings)
@@ -509,10 +610,10 @@ public class EmailService
         {
             _logger.LogInformation("[EMAIL:{OperationId}] Resolving SMTP host DNS... host={Host}", operationId, settings.Host);
             var dnsSw = Stopwatch.StartNew();
-            var addresses = await Dns.GetHostAddressesAsync(settings.Host);
+            var addresses = await ResolveAddressCandidatesAsync(settings.Host, operationId);
             dnsSw.Stop();
 
-            var printableAddresses = addresses.Length == 0
+            var printableAddresses = addresses.Count == 0
                 ? "(none)"
                 : string.Join(",", addresses.Select(a => $"{a}({a.AddressFamily})"));
 
@@ -520,7 +621,7 @@ public class EmailService
                 "[EMAIL:{OperationId}] DNS resolved in {ElapsedMs}ms. addressCount={AddressCount} addresses={Addresses}",
                 operationId,
                 dnsSw.ElapsedMilliseconds,
-                addresses.Length,
+                addresses.Count,
                 printableAddresses);
         }
         catch (Exception ex)
@@ -533,8 +634,7 @@ public class EmailService
 
         try
         {
-            var addresses = await Dns.GetHostAddressesAsync(settings.Host);
-            var orderedAddresses = OrderAddresses(addresses);
+            var orderedAddresses = await ResolveAddressCandidatesAsync(settings.Host, operationId);
             var perAddressTimeoutMs = GetPerAddressTimeoutMs(4000, orderedAddresses.Count);
 
             if (orderedAddresses.Count == 0)
