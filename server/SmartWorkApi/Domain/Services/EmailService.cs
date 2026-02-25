@@ -200,6 +200,83 @@ public class EmailService
             && settings.SecureSocketOptions == SecureSocketOptions.StartTls;
     }
 
+    private static IReadOnlyList<IPAddress> OrderAddresses(IPAddress[] addresses)
+    {
+        return addresses
+            .OrderBy(a => a.AddressFamily == AddressFamily.InterNetwork ? 0 : 1)
+            .ThenBy(a => a.ToString(), StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static int GetPerAddressTimeoutMs(int totalTimeoutMs, int addressCount)
+    {
+        if (addressCount <= 0) return Math.Max(5000, totalTimeoutMs);
+
+        var bySplit = totalTimeoutMs / addressCount;
+        return Math.Max(5000, bySplit);
+    }
+
+    private async Task ConnectWithAddressFallbackAsync(SmtpClient client, SmtpSettings settings, string operationId)
+    {
+        var addresses = await Dns.GetHostAddressesAsync(settings.Host);
+        if (addresses.Length == 0)
+        {
+            _logger.LogWarning("[EMAIL:{OperationId}] DNS returned no addresses for host={Host}. Using default MailKit connect.", operationId, settings.Host);
+            await client.ConnectAsync(settings.Host, settings.Port, settings.SecureSocketOptions);
+            return;
+        }
+
+        var orderedAddresses = OrderAddresses(addresses);
+        var perAddressTimeoutMs = GetPerAddressTimeoutMs(settings.TimeoutMs, orderedAddresses.Count);
+        Exception? lastException = null;
+
+        foreach (var address in orderedAddresses)
+        {
+            TcpClient? tcpClient = null;
+            try
+            {
+                tcpClient = new TcpClient(address.AddressFamily);
+                using var connectCts = new CancellationTokenSource(perAddressTimeoutMs);
+
+                var connectSw = Stopwatch.StartNew();
+                _logger.LogInformation(
+                    "[EMAIL:{OperationId}] SMTP socket connect attempt. address={Address} family={Family} port={Port} timeoutMs={TimeoutMs}",
+                    operationId,
+                    address,
+                    address.AddressFamily,
+                    settings.Port,
+                    perAddressTimeoutMs);
+
+                await tcpClient.ConnectAsync(address, settings.Port, connectCts.Token);
+                connectSw.Stop();
+
+                _logger.LogInformation(
+                    "[EMAIL:{OperationId}] SMTP socket connect OK in {ElapsedMs}ms. local={LocalEndPoint} remote={RemoteEndPoint}",
+                    operationId,
+                    connectSw.ElapsedMilliseconds,
+                    tcpClient.Client.LocalEndPoint?.ToString() ?? "(null)",
+                    tcpClient.Client.RemoteEndPoint?.ToString() ?? "(null)");
+
+                await client.ConnectAsync(tcpClient.Client, settings.Host, settings.Port, settings.SecureSocketOptions);
+                return;
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+                _logger.LogWarning(ex,
+                    "[EMAIL:{OperationId}] SMTP connect attempt failed. address={Address} family={Family} port={Port}",
+                    operationId,
+                    address,
+                    address.AddressFamily,
+                    settings.Port);
+
+                tcpClient?.Dispose();
+            }
+        }
+
+        throw new TimeoutException($"Could not connect to SMTP host '{settings.Host}:{settings.Port}' on any resolved address.", lastException);
+    }
+
     private async Task SendEmailViaSmtpWithSettingsAsync(MimeMessage message, string username, string password, string operationId, SmtpSettings settings, string attemptLabel)
     {
         _logger.LogInformation("[EMAIL:{OperationId}] SMTP attempt={AttemptLabel}", operationId, attemptLabel);
@@ -224,7 +301,7 @@ public class EmailService
         {
             var sw = Stopwatch.StartNew();
             _logger.LogInformation("[EMAIL:{OperationId}] Connecting to SMTP server...", operationId);
-            await client.ConnectAsync(settings.Host, settings.Port, settings.SecureSocketOptions);
+            await ConnectWithAddressFallbackAsync(client, settings, operationId);
             sw.Stop();
             _logger.LogInformation(
                 "[EMAIL:{OperationId}] SMTP connect completed in {ElapsedMs}ms. connected={Connected} secure={Secure} authMechanisms={AuthMechanisms}",
@@ -456,26 +533,57 @@ public class EmailService
 
         try
         {
-            using var tcpProbe = new TcpClient(AddressFamily.InterNetwork);
-            using var probeCts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-            var probeSw = Stopwatch.StartNew();
+            var addresses = await Dns.GetHostAddressesAsync(settings.Host);
+            var orderedAddresses = OrderAddresses(addresses);
+            var perAddressTimeoutMs = GetPerAddressTimeoutMs(4000, orderedAddresses.Count);
 
-            _logger.LogInformation(
-                "[EMAIL:{OperationId}] TCP probe start. host={Host} port={Port} timeoutMs={TimeoutMs}",
-                operationId,
-                settings.Host,
-                settings.Port,
-                4000);
+            if (orderedAddresses.Count == 0)
+            {
+                _logger.LogWarning("[EMAIL:{OperationId}] TCP probe skipped: no DNS addresses for host={Host}.", operationId, settings.Host);
+                return;
+            }
 
-            await tcpProbe.ConnectAsync(settings.Host, settings.Port, probeCts.Token);
-            probeSw.Stop();
+            foreach (var address in orderedAddresses)
+            {
+                try
+                {
+                    using var tcpProbe = new TcpClient(address.AddressFamily);
+                    using var probeCts = new CancellationTokenSource(perAddressTimeoutMs);
+                    var probeSw = Stopwatch.StartNew();
 
-            _logger.LogInformation(
-                "[EMAIL:{OperationId}] TCP probe OK in {ElapsedMs}ms. local={LocalEndPoint} remote={RemoteEndPoint}",
-                operationId,
-                probeSw.ElapsedMilliseconds,
-                tcpProbe.Client.LocalEndPoint?.ToString() ?? "(null)",
-                tcpProbe.Client.RemoteEndPoint?.ToString() ?? "(null)");
+                    _logger.LogInformation(
+                        "[EMAIL:{OperationId}] TCP probe start. host={Host} address={Address} family={Family} port={Port} timeoutMs={TimeoutMs}",
+                        operationId,
+                        settings.Host,
+                        address,
+                        address.AddressFamily,
+                        settings.Port,
+                        perAddressTimeoutMs);
+
+                    await tcpProbe.ConnectAsync(address, settings.Port, probeCts.Token);
+                    probeSw.Stop();
+
+                    _logger.LogInformation(
+                        "[EMAIL:{OperationId}] TCP probe OK in {ElapsedMs}ms. address={Address} local={LocalEndPoint} remote={RemoteEndPoint}",
+                        operationId,
+                        probeSw.ElapsedMilliseconds,
+                        address,
+                        tcpProbe.Client.LocalEndPoint?.ToString() ?? "(null)",
+                        tcpProbe.Client.RemoteEndPoint?.ToString() ?? "(null)");
+
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "[EMAIL:{OperationId}] TCP probe FAILED. host={Host} address={Address} family={Family} port={Port}",
+                        operationId,
+                        settings.Host,
+                        address,
+                        address.AddressFamily,
+                        settings.Port);
+                }
+            }
         }
         catch (Exception ex)
         {
